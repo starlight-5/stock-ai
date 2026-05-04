@@ -12,6 +12,7 @@ from .kis_api.auth import KISAuthHandler
 from .kis_api.order import KISOrderHandler
 from .kis_api.account import KISAccountHandler
 from .kis_api.market import KISMarketHandler
+from .kis_api.analysis import KISAnalysisHandler
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class KISApiHandler:
         self._order = KISOrderHandler(appkey, appsecret, env_dv, self._access_token)
         self._account = KISAccountHandler(appkey, appsecret, env_dv, self._access_token)
         self._market = KISMarketHandler(appkey, appsecret, env_dv, self._access_token)
+        self._analysis = KISAnalysisHandler(appkey, appsecret, env_dv, self._access_token)
         
     @property
     def access_token(self) -> str:
@@ -61,6 +63,7 @@ class KISApiHandler:
         self._order.access_token = token
         self._account.access_token = token
         self._market.access_token = token
+        self._analysis.access_token = token
         logger.info("access_token이 모든 내부 핸들러에 동기화되었습니다.")
         
     # ==========================================
@@ -202,3 +205,39 @@ class KISApiHandler:
     def get_industry_price(self, excd: str, gb1: str = "0") -> Dict[str, Any]:
         """해외주식 업종별코드조회"""
         return self._market.get_industry_price(excd, gb1)
+        
+    # ==========================================
+    # 시세 분석 (Market Analysis) 기능 위임
+    # ==========================================
+
+    def get_price_fluct(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 가격급등락"""
+        return self._analysis.get_price_fluct(excd, **kwargs)
+
+    def get_volume_surge(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 거래량급증"""
+        return self._analysis.get_volume_surge(excd, **kwargs)
+
+    def get_volume_power(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 매수체결강도상위"""
+        return self._analysis.get_volume_power(excd, **kwargs)
+
+    def get_updown_rate(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 상승율/하락율"""
+        return self._analysis.get_updown_rate(excd, **kwargs)
+
+    def get_trade_vol(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 거래량순위"""
+        return self._analysis.get_trade_vol(excd, **kwargs)
+
+    def get_trade_pbmn(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 거래대금순위"""
+        return self._analysis.get_trade_pbmn(excd, **kwargs)
+
+    def get_trade_growth(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 거래증가율순위"""
+        return self._analysis.get_trade_growth(excd, **kwargs)
+
+    def get_trade_turnover(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
+        """해외주식 거래회전율순위"""
+        return self._analysis.get_trade_turnover(excd, **kwargs)
