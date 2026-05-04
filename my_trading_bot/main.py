@@ -74,10 +74,12 @@ async def main() -> None:
     if strategy_name == "v1_smc":
         trading_cfg = config.get("trading", {})
         bot = V1SmcBot(
-            api    = api,
-            symbol = trading_cfg.get("symbol", "AAPL"),
-            excd   = trading_cfg.get("excd", "NAS"),
-            hts_id = hts_id,
+            api          = api,
+            symbol       = trading_cfg.get("symbol", "AAPL"),
+            excd         = trading_cfg.get("excd", "NAS"),
+            hts_id       = hts_id,
+            acnt_no      = acnt_no,
+            acnt_prdt_cd = acnt_prdt,
         )
     else:
         logger.error(f"알 수 없는 전략: {strategy_name}")

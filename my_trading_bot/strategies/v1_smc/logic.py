@@ -34,17 +34,22 @@ class V1SmcBot(BaseStrategy):
     전체 파이프라인을 총괄하는 봇 클래스입니다.
     """
 
-    def __init__(self, api: KISApiHandler, symbol: str, excd: str, hts_id: str):
+    def __init__(self, api: KISApiHandler, symbol: str, excd: str, hts_id: str,
+                 acnt_no: str = "", acnt_prdt_cd: str = "01"):
         """
-        :param api: 초기화된 KISApiHandler 인스턴스
-        :param symbol: 거래 종목 코드 (예: "AAPL")
-        :param excd:   거래소 코드 (예: "NAS")
-        :param hts_id: 체결통보 수신용 HTS ID
+        :param api:          초기화된 KISApiHandler 인스턴스
+        :param symbol:       거래 종목 코드 (예: "AAPL")
+        :param excd:         거래소 코드 (예: "NAS")
+        :param hts_id:       체결통보 수신용 HTS ID
+        :param acnt_no:      계좌번호 (알 8자리, .env 의 KIS_ACCOUNT_NO)
+        :param acnt_prdt_cd: 계좌상품코드 (.env 의 KIS_ACCOUNT_PRODUCT_CODE)
         """
         self._api     = api
         self.symbol   = symbol
         self.excd     = excd
         self.hts_id   = hts_id
+        self.acnt_no       = acnt_no
+        self.acnt_prdt_cd  = acnt_prdt_cd
 
         # 봇 현재 상태
         self._state   = BotState.IDLE
@@ -122,7 +127,8 @@ class V1SmcBot(BaseStrategy):
     async def _stage0_snapshot_balance(self) -> None:
         """장 시작 시 계좌 잔고를 스냅샷으로 저장합니다."""
         res = await asyncio.to_thread(
-            self._api.inquire_overseas_present_balance
+            self._api.inquire_overseas_present_balance,
+            self.acnt_no, self.acnt_prdt_cd
         )
         balance = self._parse_balance(res)
         self._daily.starting_balance = balance
@@ -139,7 +145,10 @@ class V1SmcBot(BaseStrategy):
             if self._state == BotState.SHUTDOWN:
                 break
 
-            res = await asyncio.to_thread(self._api.inquire_overseas_present_balance)
+            res = await asyncio.to_thread(
+                self._api.inquire_overseas_present_balance,
+                self.acnt_no, self.acnt_prdt_cd
+            )
             self._daily.current_balance = self._parse_balance(res)
 
             drawdown = self._daily.drawdown_ratio
@@ -252,8 +261,11 @@ class V1SmcBot(BaseStrategy):
             if not candles_5m:
                 continue
 
-            # 잔고 조회로 현재 총 자본 확인
-            bal_res  = await asyncio.to_thread(self._api.inquire_overseas_present_balance)
+            # 잔고 조회로 현재 전체 자본 확인
+            bal_res  = await asyncio.to_thread(
+                self._api.inquire_overseas_present_balance,
+                self.acnt_no, self.acnt_prdt_cd
+            )
             capital  = self._parse_balance(bal_res)
 
             # 현재 호가(진입 예정가) 조회
@@ -410,7 +422,10 @@ class V1SmcBot(BaseStrategy):
         self._state = BotState.COOLDOWN
         logger.info("[사이클 종료] 잔고 및 누적 손실 재확인 중...")
 
-        res = await asyncio.to_thread(self._api.inquire_overseas_present_balance)
+        res = await asyncio.to_thread(
+            self._api.inquire_overseas_present_balance,
+            self.acnt_no, self.acnt_prdt_cd
+        )
         self._daily.current_balance = self._parse_balance(res)
         self._daily.trade_count    += 1
 
