@@ -45,8 +45,20 @@ POI_CANDLE_COUNT_15M: int = 50
 # 5분봉 진입 확정 신호 분석에 사용할 캔들 개수
 ENTRY_CANDLE_COUNT_5M: int = 20
 
-# FVG 탐지 시 갭의 최소 크기 (현재가 대비 비율, 0 = 모든 갭 탐지)
-FVG_MIN_SIZE_RATIO: float = 0.001  # 0.1% 이상의 갭만 유효한 FVG로 인정
+# FVG 탐지: ATR 기반 동적 최소 갭 크기
+# ATR(평균 실제 범위)을 기준으로 갭 크기의 유효성을 판단합니다.
+# 변동성이 높을 때는 기준이 커지고, 낮을 때는 작아지는 동적 필터입니다.
+
+# ATR 계산 기간 (캔들 수)
+ATR_PERIOD: int = 14
+
+# 갭 크기가 ATR × 이 배수 이상이어야 유효한 FVG로 인정
+# 예: 0.5 → 갭 ≥ ATR × 0.5 (ATR의 절반 이상)
+FVG_ATR_MULTIPLIER: float = 0.5
+
+# ATR을 계산할 수 없을 때(캔들 부족 등) 사용하는 고정 비율 fallback
+# 현재가 대비 비율 (0.1% = 0.001)
+FVG_MIN_SIZE_RATIO: float = 0.001  # ATR 미사용 시 fallback 기준
 
 # OB 도지캔들 인정 기준
 # 몸통(|close-open|)이 전체 캔들 범위(high-low) 대비 이 비율 이하이면 도지로 간주

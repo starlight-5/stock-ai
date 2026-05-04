@@ -21,7 +21,10 @@ FVG(Fair Value Gap)와 OB(Order Block) 구역을 탐지하는 모듈입니다.
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 
-from .params import FVG_MIN_SIZE_RATIO, OB_DOJI_BODY_RATIO, OB_DOJI_WICK_RATIO
+from .params import (
+    FVG_MIN_SIZE_RATIO, FVG_ATR_MULTIPLIER, ATR_PERIOD,
+    OB_DOJI_BODY_RATIO, OB_DOJI_WICK_RATIO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,68 +48,120 @@ def _parse_candle(raw: Dict[str, Any]) -> Optional[Dict[str, float]]:
         return None
 
 
-def detect_fvg(candles_raw: List[Dict[str, Any]], min_size_ratio: float = FVG_MIN_SIZE_RATIO) -> List[Dict[str, Any]]:
+def calculate_atr(candles: List[Dict[str, float]], period: int = ATR_PERIOD) -> Optional[float]:
+    """
+    ATR(Average True Range, 평균 실제 범위)을 계산합니다.
+
+    True Range(TR) = max(
+        high - low,
+        |high - prev_close|,
+        |low  - prev_close|
+    )
+    ATR = TR의 단순 이동평균 (EMA 대신 SMA 사용, 안정성 우선)
+
+    :param candles: _parse_candle()로 파싱된 캔들 리스트 (오래된 → 최신)
+    :param period:  ATR 평균 계산 기간 (기본 14)
+    :return: ATR 값. 캔들 부족 시 None 반환
+    """
+    if len(candles) < period + 1:
+        logger.debug(f"ATR 계산 불가: 캔들 {len(candles)}개 < 필요 {period + 1}개")
+        return None
+
+    tr_list: List[float] = []
+    for i in range(1, len(candles)):
+        high       = candles[i]["high"]
+        low        = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low  - prev_close),
+        )
+        tr_list.append(tr)
+
+    # 최근 period 개의 TR 평균
+    atr = sum(tr_list[-period:]) / period
+    logger.debug(f"ATR({period}) = {atr:.6f}")
+    return atr
+def detect_fvg(
+    candles_raw: List[Dict[str, Any]],
+    atr: Optional[float] = None,
+    atr_multiplier: float = FVG_ATR_MULTIPLIER,
+    min_size_ratio: float = FVG_MIN_SIZE_RATIO,
+) -> List[Dict[str, Any]]:
     """
     연속된 캔들 데이터에서 모든 FVG(Fair Value Gap) 구역을 탐지하여 반환합니다.
 
-    :param candles_raw: KIS API 시세 응답의 캔들 리스트 (오래된 순서 → 최신 순서)
-    :param min_size_ratio: 유효한 FVG로 인정할 최소 갭 크기 비율
-    :return: 탐지된 FVG 구역 목록. 각 항목은 아래 구조를 가집니다:
+    [최소 갭 크기 판단 방식]
+      - ATR 제공 시 : gap_size >= ATR × atr_multiplier  (동적 필터, 권장)
+      - ATR 미제공 시: gap_size / prev_close >= min_size_ratio  (고정 비율 fallback)
+
+    :param candles_raw:    KIS API 시세 응답의 캔들 리스트 (오래된 순서 → 최신 순서)
+    :param atr:            사전 계산된 ATR 값. None 이면 고정 비율 fallback 사용.
+    :param atr_multiplier: ATR 기반 필터의 배율 (기본 0.5 × ATR)
+    :param min_size_ratio: ATR 미사용 시 적용할 고정 비율 기준 (기본 0.1%)
+    :return: 탐지된 FVG 구역 목록. 각 항목:
              {
-               'type': 'bullish' | 'bearish',  # FVG 방향
-               'top': float,                   # 구역 상단 가격
-               'bottom': float,                # 구역 하단 가격
-               'mid': float,                   # 구역 중간값 (진입 기준)
-               'index': int,                   # 탐지된 캔들 인덱스
+               'type': 'bullish' | 'bearish',
+               'top': float, 'bottom': float, 'mid': float,
+               'index': int, 'gap_size': float, 'atr': float|None
              }
     """
-    # 원시 데이터 파싱
     candles = [_parse_candle(c) for c in candles_raw]
-    candles = [c for c in candles if c is not None]  # 파싱 실패 제거
+    candles = [c for c in candles if c is not None]
+
+    use_atr  = atr is not None and atr > 0
+    min_gap  = atr * atr_multiplier if use_atr else None
+    filter_mode = (f"ATR×{atr_multiplier} ({atr:.5f})" if use_atr
+                   else f"고정비율 {min_size_ratio:.4%}")
+    logger.debug(f"FVG 필터 모드: {filter_mode}")
 
     fvg_zones: List[Dict[str, Any]] = []
 
     # 3개의 캔들이 필요하므로 i는 1부터 len-1까지 탐색 (i가 두 번째 캔들)
     for i in range(1, len(candles) - 1):
-        prev  = candles[i - 1]   # 첫 번째 캔들
-        curr  = candles[i]       # 두 번째 캔들 (FVG를 만드는 중심 캔들)
-        nxt   = candles[i + 1]   # 세 번째 캔들
+        prev = candles[i - 1]   # 첫 번째 캔들
+        nxt  = candles[i + 1]   # 세 번째 캔들
 
-        # ─── 상승 FVG 탐지 ───
-        # 세 번째 캔들의 저가 > 첫 번째 캔들의 고가 → 위로 건너뜀
+        # ─── 상승 FVG: 세 번째 저가 > 첫 번째 고가 ───
         if nxt["low"] > prev["high"]:
             gap_bottom = prev["high"]
             gap_top    = nxt["low"]
             gap_size   = gap_top - gap_bottom
 
-            # 최소 갭 크기 필터: 너무 작은 갭은 노이즈로 처리
-            if gap_size / prev["close"] >= min_size_ratio:
+            valid = (gap_size >= min_gap) if use_atr else (gap_size / prev["close"] >= min_size_ratio)
+            if valid:
                 fvg_zones.append({
-                    "type":   "bullish",
-                    "top":    gap_top,
-                    "bottom": gap_bottom,
-                    "mid":    (gap_top + gap_bottom) / 2,
-                    "index":  i,
+                    "type":     "bullish",
+                    "top":      gap_top,
+                    "bottom":   gap_bottom,
+                    "mid":      (gap_top + gap_bottom) / 2,
+                    "index":    i,
+                    "gap_size": gap_size,
+                    "atr":      atr,
                 })
 
-        # ─── 하락 FVG 탐지 ───
-        # 세 번째 캔들의 고가 < 첫 번째 캔들의 저가 → 아래로 건너뜀
+        # ─── 하락 FVG: 세 번째 고가 < 첫 번째 저가 ───
         elif nxt["high"] < prev["low"]:
             gap_top    = prev["low"]
             gap_bottom = nxt["high"]
             gap_size   = gap_top - gap_bottom
 
-            if gap_size / prev["close"] >= min_size_ratio:
+            valid = (gap_size >= min_gap) if use_atr else (gap_size / prev["close"] >= min_size_ratio)
+            if valid:
                 fvg_zones.append({
-                    "type":   "bearish",
-                    "top":    gap_top,
-                    "bottom": gap_bottom,
-                    "mid":    (gap_top + gap_bottom) / 2,
-                    "index":  i,
+                    "type":     "bearish",
+                    "top":      gap_top,
+                    "bottom":   gap_bottom,
+                    "mid":      (gap_top + gap_bottom) / 2,
+                    "index":    i,
+                    "gap_size": gap_size,
+                    "atr":      atr,
                 })
 
-    logger.info(f"FVG 탐지 완료: {len(fvg_zones)}개 발견")
+    logger.info(f"FVG 탐지 완료: {len(fvg_zones)}개 발견 (필터: {filter_mode})")
     return fvg_zones
+
 
 
 def _is_long_wick_doji(candle: Dict[str, float],

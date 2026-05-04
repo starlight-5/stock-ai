@@ -22,7 +22,7 @@ from .params import (
     POI_CANDLE_COUNT_15M, ENTRY_CANDLE_COUNT_5M,
     TP1_CLOSE_RATIO, BUY_DVSN, SELL_DVSN, ORDER_TYPE_MARKET,
 )
-from .poi_detector import detect_fvg, detect_ob, is_price_in_poi
+from .poi_detector import detect_fvg, detect_ob, is_price_in_poi, calculate_atr
 from .sl_tp_calculator import calc_qty, calc_tp1, calc_tp2, calc_sl_price
 from ...utils.market_schedule import (
     wait_for_market_open, is_market_open, is_market_closing_soon, now_et
@@ -226,7 +226,7 @@ class V1SmcBot(BaseStrategy):
     # ──────────────────────────────────────────────
 
     async def _stage1_setup_poi(self) -> None:
-        """15분봉 캔들을 조회하고 FVG/OB 구역을 탐지하여 POI로 설정합니다."""
+        """15분봉 캔들을 조회하고 ATR을 계산한 후, FVG/OB 구역을 탐지하여 POI로 설정합니다."""
         logger.info("[1단계] 15분봉 POI 설정 중...")
 
         res = await asyncio.to_thread(
@@ -240,13 +240,21 @@ class V1SmcBot(BaseStrategy):
         candles = self._extract_candles(res)
         self._candles_15m = candles
 
-        fvg_zones = detect_fvg(candles)
+        # ATR 계산: 변동성을 반영한 동적 FVG 필터에 활용
+        atr = calculate_atr(candles)
+        if atr:
+            logger.info(f"[1단계] ATR = {atr:.5f} (동적 필터 적용)")
+        else:
+            logger.warning("[1단계] ATR 계산 불가 (캔들 부족) → 고정 비율 fallback 사용")
+
+        fvg_zones = detect_fvg(candles, atr=atr)
         ob_zones  = detect_ob(candles, fvg_zones)
 
         # 롱 전략이므로 Bullish(지지) 구역만 POI로 사용
         self._poi_zones = [z for z in (fvg_zones + ob_zones) if z["type"] == "bullish"]
 
         logger.info(f"[1단계] POI {len(self._poi_zones)}개 설정 완료")
+
 
     # ──────────────────────────────────────────────
     # [2단계] 웹소켓 콜백 - 실시간 POI 터치 감시
