@@ -1,1 +1,146 @@
- # KIS, Alpaca API 연결
+# -*- coding: utf-8 -*-
+"""
+한국투자증권(KIS) API 통신을 담당하는 메인 파사드(Facade) 모듈입니다.
+내부적으로 Auth, Order, Account 핸들러를 조합하여 제공합니다.
+"""
+import os
+import logging
+from dotenv import load_dotenv, find_dotenv
+from typing import Dict, Any
+
+from .kis_api.auth import KISAuthHandler
+from .kis_api.order import KISOrderHandler
+from .kis_api.account import KISAccountHandler
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
+# .env 파일 로드 (상위 폴더에 있는 .env 파일을 자동으로 찾아줍니다)
+load_dotenv(find_dotenv())
+
+class KISApiHandler:
+    """
+    한국투자증권(KIS) 오픈 API 통신을 담당하는 파사드 클래스입니다.
+    이 클래스를 통해 모든 KIS API 기능(인증, 주문, 조회)에 접근할 수 있습니다.
+    외부 인터페이스는 기존과 동일하게 유지하여 하위 호환성을 보장합니다.
+    """
+    
+    def __init__(self, appkey: str, appsecret: str, env_dv: str = "real"):
+        """
+        KISApiHandler 인스턴스를 초기화합니다.
+        
+        Args:
+            appkey (str): 발급받은 앱키 (App Key)
+            appsecret (str): 발급받은 앱시크릿키 (App Secret)
+            env_dv (str): 환경 구분 ('real': 실전 투자, 'demo': 모의 투자)
+        """
+        self.appkey = appkey
+        self.appsecret = appsecret
+        self.env_dv = env_dv
+        self._access_token = ""
+        
+        # 각 하위 기능별 핸들러 초기화
+        self._auth = KISAuthHandler(appkey, appsecret, env_dv, self._access_token)
+        self._order = KISOrderHandler(appkey, appsecret, env_dv, self._access_token)
+        self._account = KISAccountHandler(appkey, appsecret, env_dv, self._access_token)
+        
+    @property
+    def access_token(self) -> str:
+        """현재 설정된 접근 토큰을 반환합니다."""
+        return self._access_token
+        
+    @access_token.setter
+    def access_token(self, token: str):
+        """
+        접근 토큰을 설정하고, 모든 하위 핸들러에 동기화합니다.
+        """
+        self._access_token = token
+        # 하위 핸들러에 토큰 동기화
+        self._auth.access_token = token
+        self._order.access_token = token
+        self._account.access_token = token
+        logger.info("access_token이 모든 내부 핸들러에 동기화되었습니다.")
+        
+    # ==========================================
+    # [인증 API 위임]
+    # ==========================================
+    def issue_access_token(self) -> Dict[str, Any]:
+        """[인증] OAuth 접근토큰을 발급받습니다."""
+        res = self._auth.issue_access_token()
+        if "access_token" in res:
+            # 발급받은 토큰을 프로퍼티 셋터를 통해 저장 및 동기화
+            self.access_token = res["access_token"]
+        return res
+        
+    def issue_ws_token(self) -> Dict[str, Any]:
+        """[인증] WebSocket 실시간 데이터 접속키를 발급받습니다."""
+        return self._auth.issue_ws_token()
+        
+    # ==========================================
+    # [주문 API 위임]
+    # ==========================================
+    def order_overseas_stock(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문 (매수/매도)"""
+        return self._order.order_overseas_stock(*args, **kwargs)
+        
+    def order_overseas_rvsecncl(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 정정취소주문"""
+        return self._order.order_overseas_rvsecncl(*args, **kwargs)
+        
+    def order_overseas_resv(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 예약주문접수"""
+        return self._order.order_overseas_resv(*args, **kwargs)
+        
+    def order_overseas_resv_ccnl(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 예약주문접수취소"""
+        return self._order.order_overseas_resv_ccnl(*args, **kwargs)
+
+    # ==========================================
+    # [조회/계좌 API 위임]
+    # ==========================================
+    def inquire_overseas_psamount(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 해외주식 매수가능금액조회"""
+        return self._account.inquire_overseas_psamount(*args, **kwargs)
+
+    def inquire_overseas_nccs(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 해외주식 미체결내역"""
+        return self._account.inquire_overseas_nccs(*args, **kwargs)
+
+    def inquire_overseas_balance(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 해외주식 잔고"""
+        return self._account.inquire_overseas_balance(*args, **kwargs)
+
+    def inquire_overseas_ccnl(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 해외주식 주문체결내역"""
+        return self._account.inquire_overseas_ccnl(*args, **kwargs)
+
+    def inquire_overseas_present_balance(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 해외주식 체결기준현재잔고"""
+        return self._account.inquire_overseas_present_balance(*args, **kwargs)
+
+    def inquire_overseas_order_resv_list(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 예약주문조회"""
+        return self._account.inquire_overseas_order_resv_list(*args, **kwargs)
+
+    def inquire_paymt_stdr_balance(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 결제기준잔고"""
+        return self._account.inquire_paymt_stdr_balance(*args, **kwargs)
+
+    def inquire_period_trans(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 일별거래내역"""
+        return self._account.inquire_period_trans(*args, **kwargs)
+
+    def inquire_period_profit(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 기간손익"""
+        return self._account.inquire_period_profit(*args, **kwargs)
+
+    def inquire_foreign_margin(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외증거금 통화별조회"""
+        return self._account.inquire_foreign_margin(*args, **kwargs)
+
+    def inquire_algo_ordno(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 지정가주문번호조회"""
+        return self._account.inquire_algo_ordno(*args, **kwargs)
+
+    def inquire_algo_ccnl(self, *args, **kwargs) -> Dict[str, Any]:
+        """[해외주식] 주문/계좌 > 해외주식 지정가체결내역조회"""
+        return self._account.inquire_algo_ccnl(*args, **kwargs)

@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments (가상환경)
+venv/
+.venv/
+env/
+.env/
+
+# Secret files (중요! API 키 정보가 담긴 .env는 반드시 무시되어야 합니다)
+.env
+.env.*
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code / IDE settings
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+myenv/
