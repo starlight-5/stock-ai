@@ -13,6 +13,7 @@ from .kis_api.order import KISOrderHandler
 from .kis_api.account import KISAccountHandler
 from .kis_api.market import KISMarketHandler
 from .kis_api.analysis import KISAnalysisHandler
+from .kis_api.websocket import KISWebSocketHandler
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -46,6 +47,9 @@ class KISApiHandler:
         self._account = KISAccountHandler(appkey, appsecret, env_dv, self._access_token)
         self._market = KISMarketHandler(appkey, appsecret, env_dv, self._access_token)
         self._analysis = KISAnalysisHandler(appkey, appsecret, env_dv, self._access_token)
+        
+        # 웹소켓 핸들러는 approval_key 발급 전이므로 빈 값으로 초기화합니다.
+        self._websocket = KISWebSocketHandler("", env_dv)
         
     @property
     def access_token(self) -> str:
@@ -241,3 +245,42 @@ class KISApiHandler:
     def get_trade_turnover(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
         """해외주식 거래회전율순위"""
         return self._analysis.get_trade_turnover(excd, **kwargs)
+
+    # ==========================================
+    # 실시간 웹소켓 (WebSocket) 기능 위임
+    # ==========================================
+
+    def connect_ws(self):
+        """
+        웹소켓 접속키(Approval Key)를 발급받아 내부 웹소켓 핸들러에 설정합니다.
+        """
+        res = self._auth.issue_ws_token()
+        if "approval_key" in res:
+            self._websocket.approval_key = res["approval_key"]
+            logger.info("웹소켓 접속키(Approval Key) 설정 완료")
+        else:
+            logger.error("웹소켓 접속키 발급 실패")
+
+    def get_asking_price_req(self, symb: str, tr_type: str = "1") -> str:
+        """해외주식 실시간호가(미국) 구독 요청 문자열 생성"""
+        return self._websocket.get_asking_price_req(symb, tr_type)
+
+    def get_delayed_ccnl_req(self, symb: str, tr_type: str = "1") -> str:
+        """해외주식 실시간지연체결가 구독 요청 문자열 생성"""
+        return self._websocket.get_delayed_ccnl_req(symb, tr_type)
+
+    def get_ccnl_notice_req(self, hts_id: str, tr_type: str = "1") -> str:
+        """해외주식 실시간체결통보 구독 요청 문자열 생성"""
+        return self._websocket.get_ccnl_notice_req(hts_id, tr_type)
+
+    async def connect_and_listen_ws(self, requests_payloads: list, callback):
+        """
+        웹소켓 서버에 연결하여 실시간 데이터를 비동기 콜백으로 수신합니다.
+        :param requests_payloads: 구독 요청 JSON 리스트
+        :param callback: async def my_callback(data: str) 형식의 함수
+        """
+        if not self._websocket.approval_key:
+            logger.warning("웹소켓 접속키가 없습니다. 자동으로 발급을 시도합니다.")
+            self.connect_ws()
+            
+        await self._websocket.connect_and_listen(requests_payloads, callback)

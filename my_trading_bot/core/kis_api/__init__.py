@@ -5,6 +5,7 @@ from .order import KISOrderHandler
 from .account import KISAccountHandler
 from .market import KISMarketHandler
 from .analysis import KISAnalysisHandler
+from .websocket import KISWebSocketHandler
 
 __all__ = [
     'KISBaseClient',
@@ -12,5 +13,6 @@ __all__ = [
     'KISOrderHandler',
     'KISAccountHandler',
     'KISMarketHandler',
-    'KISAnalysisHandler'
+    'KISAnalysisHandler',
+    'KISWebSocketHandler'
 ]

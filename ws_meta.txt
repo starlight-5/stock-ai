@@ -1,0 +1,3 @@
+asking_price: TR_ID=HDFSASP0
+delayed_ccnl: TR_ID=HDFSCNT0
+ccnl_notice: TR_ID=H0GSCNI0
