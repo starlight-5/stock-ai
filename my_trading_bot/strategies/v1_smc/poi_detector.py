@@ -21,7 +21,7 @@ FVG(Fair Value Gap)와 OB(Order Block) 구역을 탐지하는 모듈입니다.
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 
-from .params import FVG_MIN_SIZE_RATIO
+from .params import FVG_MIN_SIZE_RATIO, OB_DOJI_BODY_RATIO, OB_DOJI_WICK_RATIO
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +109,51 @@ def detect_fvg(candles_raw: List[Dict[str, Any]], min_size_ratio: float = FVG_MI
     return fvg_zones
 
 
+def _is_long_wick_doji(candle: Dict[str, float],
+                        body_ratio: float = OB_DOJI_BODY_RATIO,
+                        wick_ratio: float = OB_DOJI_WICK_RATIO) -> bool:
+    """
+    주어진 캔들이 '꼬리가 긴 도지 캔들'인지 판단합니다.
+
+    조건:
+      1) 몸통(실체) 크기가 전체 범위(high-low)의 body_ratio 이하일 것  ← 도지 조건
+      2) 위 또는 아래 꼬리 길이 중 하나라도 몸통의 wick_ratio 배 이상일 것  ← 장꼬리 조건
+
+    :param candle:     {'open', 'high', 'low', 'close'} 딕셔너리
+    :param body_ratio: 몸통 / 전체 범위 기준 비율 (기본 0.3 = 30%)
+    :param wick_ratio: 꼬리 / 몸통 기준 배수  (기본 2.0 = 2배)
+    :return: 꼬리가 긴 도지이면 True
+    """
+    total_range = candle["high"] - candle["low"]
+    if total_range == 0:
+        return False
+
+    body = abs(candle["close"] - candle["open"])
+
+    # 조건 1: 몸통이 전체 범위의 body_ratio 이하여야 도지로 인정
+    if body / total_range > body_ratio:
+        return False
+
+    # 조건 2: 위 또는 아래 꼬리 중 하나라도 몸통의 wick_ratio 배 이상
+    upper_wick = candle["high"] - max(candle["open"], candle["close"])
+    lower_wick = min(candle["open"], candle["close"]) - candle["low"]
+    # 몸통이 0에 가까울 경우 전체 범위의 30%를 기준으로 삼아 나눗셈 오류 방지
+    min_wick_len = body * wick_ratio if body > 0 else total_range * 0.3
+
+    return upper_wick >= min_wick_len or lower_wick >= min_wick_len
+
+
 def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     탐지된 FVG를 기준으로 해당 FVG를 생성한 직전 캔들(Order Block)을 탐지합니다.
-    
-    - Bullish FVG 앞 → 하락 캔들(close < open)이 Bullish OB
-    - Bearish FVG 앞 → 상승 캔들(close > open)이 Bearish OB
+
+    OB 로 인정하는 직전 캔들 유형 (아래 중 하나 이상):
+      a) 방향성 캔들:
+         - Bullish FVG 앞 하락 캔들 (close < open)
+         - Bearish FVG 앞 상승 캔들 (close > open)
+      b) 꼬리가 긴 도지 캔들 (시세 거부 신호):
+         - Bullish FVG 앞: 아래 꼬리가 긴 도지 (아래로 거부 → 매수 지지)
+         - Bearish FVG 앞: 위 꼬리가 긴 도지 (위로 거부 → 매도 저항)
 
     :param candles_raw: KIS API 캔들 원시 데이터 리스트
     :param fvg_zones: detect_fvg()로 탐지된 FVG 구역 목록
@@ -132,33 +171,53 @@ def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]
             continue
 
         ob_candle = candles[ob_index]
+        is_doji = _is_long_wick_doji(ob_candle)
 
         if fvg["type"] == "bullish":
-            # Bullish FVG 직전의 하락 캔들 → Bullish OB (매수 지지 구역)
-            if ob_candle["close"] < ob_candle["open"]:
+            # ─ a) 일반 하락 캔들 ─
+            is_bearish_candle = ob_candle["close"] < ob_candle["open"]
+
+            # ─ b) 아래 꼬리가 긴 도지: 아래로 거부 신호 (매수 지지)
+            #     아래 꼬리 >= 위 꼬리 → 하락 거부 방향이 지배적
+            lower_wick = min(ob_candle["open"], ob_candle["close"]) - ob_candle["low"]
+            upper_wick = ob_candle["high"] - max(ob_candle["open"], ob_candle["close"])
+            lower_wick_dominant = is_doji and (lower_wick >= upper_wick)
+
+            if is_bearish_candle or lower_wick_dominant:
                 ob_zones.append({
-                    "type":   "bullish",
-                    "top":    ob_candle["high"],
-                    "bottom": ob_candle["low"],
-                    "mid":    (ob_candle["high"] + ob_candle["low"]) / 2,
-                    "index":  ob_index,
-                    "origin": "ob",
+                    "type":    "bullish",
+                    "top":     ob_candle["high"],
+                    "bottom":  ob_candle["low"],
+                    "mid":     (ob_candle["high"] + ob_candle["low"]) / 2,
+                    "index":   ob_index,
+                    "origin":  "ob",
+                    "is_doji": is_doji,
                 })
 
         elif fvg["type"] == "bearish":
-            # Bearish FVG 직전의 상승 캔들 → Bearish OB (매도 저항 구역)
-            if ob_candle["close"] > ob_candle["open"]:
+            # ─ a) 일반 상승 캔들 ─
+            is_bullish_candle = ob_candle["close"] > ob_candle["open"]
+
+            # ─ b) 위 꼬리가 긴 도지: 위로 거부 신호 (매도 저항)
+            #     위 꼬리 >= 아래 꼬리 → 상승 거부 방향이 지배적
+            lower_wick = min(ob_candle["open"], ob_candle["close"]) - ob_candle["low"]
+            upper_wick = ob_candle["high"] - max(ob_candle["open"], ob_candle["close"])
+            upper_wick_dominant = is_doji and (upper_wick >= lower_wick)
+
+            if is_bullish_candle or upper_wick_dominant:
                 ob_zones.append({
-                    "type":   "bearish",
-                    "top":    ob_candle["high"],
-                    "bottom": ob_candle["low"],
-                    "mid":    (ob_candle["high"] + ob_candle["low"]) / 2,
-                    "index":  ob_index,
-                    "origin": "ob",
+                    "type":    "bearish",
+                    "top":     ob_candle["high"],
+                    "bottom":  ob_candle["low"],
+                    "mid":     (ob_candle["high"] + ob_candle["low"]) / 2,
+                    "index":   ob_index,
+                    "origin":  "ob",
+                    "is_doji": is_doji,
                 })
 
     logger.info(f"OB 탐지 완료: {len(ob_zones)}개 발견")
     return ob_zones
+
 
 
 def is_price_in_poi(current_price: float, poi_zones: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
