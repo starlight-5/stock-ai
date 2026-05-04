@@ -51,11 +51,14 @@ async def main() -> None:
     setup_logging(config.get("env", {}).get("log_level", "INFO"))
     logger = logging.getLogger(__name__)
 
-    # KIS API 자격증명 (환경변수에서 로드)
+    # KIS API 자격증명 일괄 로드 (.env 우선, config.yaml 기본값 활용)
     app_key    = os.getenv("KIS_APP_KEY", "")
     app_secret = os.getenv("KIS_APP_SECRET", "")
-    env_dv     = config.get("env", {}).get("mode", "demo")
-    hts_id     = config.get("trading", {}).get("hts_id", "")
+    hts_id     = os.getenv("KIS_HTS_ID", config.get("trading", {}).get("hts_id", ""))
+    acnt_no    = os.getenv("KIS_ACCOUNT_NO", "")
+    acnt_prdt  = os.getenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
+    # 운영 환경: .env 의 KIS_ENV 가 config.yaml 보다 우선
+    env_dv     = os.getenv("KIS_ENV", config.get("env", {}).get("mode", "demo"))
 
     if not app_key or not app_secret:
         logger.error("KIS_APP_KEY 또는 KIS_APP_SECRET 환경변수가 설정되지 않았습니다.")

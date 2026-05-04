@@ -7,9 +7,10 @@ strategy: "v1_smc"
 # 거래 종목 설정
 # ─────────────────────────────────────────────────
 trading:
-  excd: "NAS"          # 거래소 코드 (NAS=나스닥, NYS=뉴욕, AMS=아멕스)
+  excd: "NAS"          # 거래소 코드 (NAS=나스닥, NYS=뉴욕, AMS=아먱스)
   symbol: "AAPL"       # 거래 종목 코드
-  hts_id: ""           # 체결통보 수신용 HTS ID (KIS 로그인 ID)
+  # KEY, SECRET, HTS_ID, 계좌번호 등 인증정보는
+  # 모두 .env 파일에서 관리합니다. (KIS_APP_KEY, KIS_HTS_ID 등)
 
 # ─────────────────────────────────────────────────
 # 리스크 관리 파라미터
@@ -31,5 +32,6 @@ tp_sl:
 # 환경 설정
 # ─────────────────────────────────────────────────
 env:
-  mode: "demo"          # "real" = 실전, "demo" = 모의투자
   log_level: "INFO"
+  # mode(real/demo)는 .env 의 KIS_ENV 값이 우선 적용됩니다.
+  mode: "demo"          # .env 의 KIS_ENV 값이 없을 때 기본값
