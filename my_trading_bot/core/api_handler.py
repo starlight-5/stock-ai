@@ -11,6 +11,7 @@ from typing import Dict, Any
 from .kis_api.auth import KISAuthHandler
 from .kis_api.order import KISOrderHandler
 from .kis_api.account import KISAccountHandler
+from .kis_api.market import KISMarketHandler
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class KISApiHandler:
         self._auth = KISAuthHandler(appkey, appsecret, env_dv, self._access_token)
         self._order = KISOrderHandler(appkey, appsecret, env_dv, self._access_token)
         self._account = KISAccountHandler(appkey, appsecret, env_dv, self._access_token)
+        self._market = KISMarketHandler(appkey, appsecret, env_dv, self._access_token)
         
     @property
     def access_token(self) -> str:
@@ -58,6 +60,7 @@ class KISApiHandler:
         self._auth.access_token = token
         self._order.access_token = token
         self._account.access_token = token
+        self._market.access_token = token
         logger.info("access_token이 모든 내부 핸들러에 동기화되었습니다.")
         
     # ==========================================
@@ -144,3 +147,58 @@ class KISApiHandler:
     def inquire_algo_ccnl(self, *args, **kwargs) -> Dict[str, Any]:
         """[해외주식] 주문/계좌 > 해외주식 지정가체결내역조회"""
         return self._account.inquire_algo_ccnl(*args, **kwargs)
+    # ==========================================
+    # 기본 시세 (Market Data) 기능 위임
+    # ==========================================
+
+    def get_price_detail(self, excd: str, symb: str) -> Dict[str, Any]:
+        """해외주식 현재가상세"""
+        return self._market.get_price_detail(excd, symb)
+
+    def get_asking_price(self, excd: str, symb: str) -> Dict[str, Any]:
+        """해외주식 현재가 호가(1호가)"""
+        return self._market.get_asking_price(excd, symb)
+
+    def get_price(self, excd: str, symb: str) -> Dict[str, Any]:
+        """해외주식 현재체결가"""
+        return self._market.get_price(excd, symb)
+
+    def get_quot_ccnl(self, excd: str, symb: str, tday: str = "", keyb: str = "") -> Dict[str, Any]:
+        """해외주식 체결추이"""
+        return self._market.get_quot_ccnl(excd, symb, tday, keyb)
+
+    def get_time_itemchartprice(self, excd: str, symb: str, nmin: str = "01", pinc: str = "1", 
+                                ncnt: str = "30", dtm: str = "", keyb: str = "") -> Dict[str, Any]:
+        """해외주식 분봉조회"""
+        return self._market.get_time_itemchartprice(excd, symb, nmin, pinc, ncnt, dtm, keyb)
+
+    def get_dailyprice(self, excd: str, symb: str, gubn: str = "0", modp: str = "0", 
+                       tday: str = "", keyb: str = "") -> Dict[str, Any]:
+        """해외주식 기간별시세"""
+        return self._market.get_dailyprice(excd, symb, gubn, modp, tday, keyb)
+
+    def get_daily_chartprice(self, excd: str, symb: str, gubn: str = "0", modp: str = "1", 
+                             bymd: str = "", dtm: str = "", keyb: str = "") -> Dict[str, Any]:
+        """해외주식 종목 기간별시세"""
+        return self._market.get_daily_chartprice(excd, symb, gubn, modp, bymd, dtm, keyb)
+
+    def get_inquire_search(self, excd: str, prcs: str, prce: str, vol: str, 
+                           amt: str, rate: str, rate2: str) -> Dict[str, Any]:
+        """해외주식 조건검색"""
+        return self._market.get_inquire_search(excd, prcs, prce, vol, amt, rate, rate2)
+
+    def get_countries_holiday(self, dt: str, excd: str) -> Dict[str, Any]:
+        """해외결제일자조회"""
+        return self._market.get_countries_holiday(dt, excd)
+
+    def get_search_info(self, prdt_type: str, prdt_cd: str) -> Dict[str, Any]:
+        """해외주식 상품기본정보"""
+        return self._market.get_search_info(prdt_type, prdt_cd)
+
+    def get_industry_theme(self, excd: str, iscd: str) -> Dict[str, Any]:
+        """해외주식 업종별시세"""
+        return self._market.get_industry_theme(excd, iscd)
+
+    def get_industry_price(self, excd: str, gb1: str = "0") -> Dict[str, Any]:
+        """해외주식 업종별코드조회"""
+        return self._market.get_industry_price(excd, gb1)
