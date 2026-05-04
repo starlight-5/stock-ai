@@ -24,6 +24,9 @@ from .params import (
 )
 from .poi_detector import detect_fvg, detect_ob, is_price_in_poi
 from .sl_tp_calculator import calc_qty, calc_tp1, calc_tp2, calc_sl_price
+from ...utils.market_schedule import (
+    wait_for_market_open, is_market_open, is_market_closing_soon, now_et
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,29 +99,57 @@ class V1SmcBot(BaseStrategy):
         self._running = True
         logger.info(f"봇 시작: {self.excd}/{self.symbol}")
 
-        # [인증] 액세스 토큰 + 웹소켓 접속키 발급
-        self._api.issue_access_token()
-        self._api.connect_ws()
+        # ── 미국 정규장 대기 루프 외부 실행문 ──
+        # 정규장이 열릴 때까지 대기하다가 매일 장 시작 시 자동 재실행됩니다.
+        while self._running:
+            # 정규장 오픈까지 대기
+            await wait_for_market_open()
 
-        # [0단계] 시작 잔고 스냅샷
-        await self._stage0_snapshot_balance()
+            if not self._running:
+                break
 
-        # [1단계] 15분봉 POI 초기 설정
-        await self._stage1_setup_poi()
+            logger.info(f"[장 시작] ET {now_et().strftime('%H:%M:%S')} — 하루 매매 시작")
 
-        # 백그라운드 태스크 시작
-        asyncio.create_task(self._kill_switch_loop())
-        asyncio.create_task(self._standby_recalc_loop())
+            # [인증] 액세스 토큰 + 웹소켓 접속키 발급
+            self._api.issue_access_token()
+            self._api.connect_ws()
 
-        # 웹소켓 구독 요청 목록 생성 (실시간 체결가 + 체결통보)
-        ws_requests = [
-            self._api.get_delayed_ccnl_req(self.symbol),   # 실시간 지연 체결가
-            self._api.get_ccnl_notice_req(self.hts_id),    # 체결통보
-        ]
+            # [0단계] 시작 잔고 스냅샷 (일일 초기화)
+            self._daily = DailyStats()
+            await self._stage0_snapshot_balance()
 
-        logger.info("웹소켓 수신 루프 시작")
-        self._state = BotState.MONITORING
-        await self._api.connect_and_listen_ws(ws_requests, self._ws_callback)
+            # [1단계] 15분봉 POI 설정
+            await self._stage1_setup_poi()
+
+            # 백그라운드 태스크 시작
+            kill_task    = asyncio.create_task(self._kill_switch_loop())
+            standby_task = asyncio.create_task(self._standby_recalc_loop())
+            close_task   = asyncio.create_task(self._market_close_watcher())
+
+            # 웹소켓 구독 요청 목록 생성
+            ws_requests = [
+                self._api.get_delayed_ccnl_req(self.symbol),
+                self._api.get_ccnl_notice_req(self.hts_id),
+            ]
+
+            logger.info("웹소켓 수신 루프 시작")
+            self._state = BotState.MONITORING
+
+            try:
+                await self._api.connect_and_listen_ws(ws_requests, self._ws_callback)
+            except Exception as e:
+                logger.error(f"웹소켓 도중 오류: {e}")
+            finally:
+                # 웹소켓 끝 나면 백그라운드 태스크 정리
+                for t in [kill_task, standby_task, close_task]:
+                    t.cancel()
+
+            if self._state == BotState.SHUTDOWN:
+                logger.warning("킬 스위치 발동 상태입니다. 차일 재시작도 중단합니다.")
+                break
+
+            logger.info("장 마감. 다음 장 오픈까지 대기합니다...")
+            # 다음 날 장 오픈까지 다시 반복
 
     # ──────────────────────────────────────────────
     # [0단계] 킬 스위치 - 잔고 스냅샷 및 감시 루프
@@ -158,6 +189,37 @@ class V1SmcBot(BaseStrategy):
                 logger.critical(f"누적 손실 한도 초과({drawdown:.2%})! 킬 스위치 발동!")
                 await self.shutdown()
                 break
+
+    # ──────────────────────────────────────────────
+    # [장 마감 감시] 장 종료 시 웹소켓 연결 해제 트리거
+    # ──────────────────────────────────────────────
+
+    async def _market_close_watcher(self) -> None:
+        """
+        미국 정규장이 마감(16:00 ET)되면 신규 진입을 차단하고,
+        웹소켓 연결을 안전하게 종료하도록 상태를 변경합니다.
+        포지션이 남아 있으면 전량 시장가로 청산합니다.
+        """
+        while self._running:
+            await asyncio.sleep(30)  # 30초마다 체크
+
+            if not is_market_open():
+                logger.info("[장 마감] 정규장이 종료되었습니다.")
+
+                # 포지션이 있으면 전량 청산
+                if self._state == BotState.IN_POSITION and self._pos.remaining_qty > 0:
+                    logger.warning("[장 마감] 잔여 포지션을 전량 시장가 청산합니다.")
+                    await asyncio.to_thread(self._market_sell_all, "장 마감 강제 청산")
+
+                # 상태를 IDLE로 변경하여 웹소켓 루프를 자연스럽게 종료
+                self._state = BotState.IDLE
+                self._running = False  # run() 루프가 장 대기로 넘어가도록
+                break
+
+            # 장 마감 30분 전: 신규 진입 차단 (MONITORING → IDLE)
+            if is_market_closing_soon(minutes=30) and self._state == BotState.MONITORING:
+                logger.info("[장 마감 임박] 30분 전 — 신규 진입을 차단합니다.")
+                self._state = BotState.IDLE
 
     # ──────────────────────────────────────────────
     # [1단계] 15분봉 POI 설정
