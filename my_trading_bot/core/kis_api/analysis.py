@@ -61,8 +61,17 @@ class KISAnalysisHandler(KISBaseClient):
         """
         5. 해외주식 거래량순위
         (TR_ID: HHDFS76310010)
+        nday: 0=당일, vol_rang: 0=전체
         """
-        params = {"AUTH": "", "EXCD": excd, **kwargs}
+        params = {
+            "AUTH": "",
+            "EXCD": excd,
+            "NDAY": kwargs.get("nday", "0"),       # 당일
+            "VOL_RANG": kwargs.get("vol_rang", "0"), # 전체
+            "PRC1": kwargs.get("prc1", ""),          # 가격 필터 시작 (없음)
+            "PRC2": kwargs.get("prc2", ""),          # 가격 필터 종료 (없음)
+            "KEYB": kwargs.get("keyb", ""),          # NEXT KEY
+        }
         return self._call_analysis_api("HHDFS76310010", "/uapi/overseas-stock/v1/ranking/trade-vol", params)
 
     def get_trade_pbmn(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
@@ -70,7 +79,15 @@ class KISAnalysisHandler(KISBaseClient):
         6. 해외주식 거래대금순위
         (TR_ID: HHDFS76320010)
         """
-        params = {"AUTH": "", "EXCD": excd, **kwargs}
+        params = {
+            "AUTH": "",
+            "EXCD": excd,
+            "NDAY": kwargs.get("nday", "0"),       # 당일
+            "VOL_RANG": kwargs.get("vol_rang", "0"), # 전체
+            "PRC1": kwargs.get("prc1", ""),          # 가격 필터 시작 (없음)
+            "PRC2": kwargs.get("prc2", ""),          # 가격 필터 종료 (없음)
+            "KEYB": kwargs.get("keyb", ""),          # NEXT KEY
+        }
         return self._call_analysis_api("HHDFS76320010", "/uapi/overseas-stock/v1/ranking/trade-pbmn", params)
 
     def get_trade_growth(self, excd: str = "NAS", **kwargs) -> Dict[str, Any]:
