@@ -5,8 +5,9 @@
 """
 import os
 import logging
+import asyncio
 from dotenv import load_dotenv, find_dotenv
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from .kis_api.auth import KISAuthHandler
 from .kis_api.order import KISOrderHandler
@@ -273,14 +274,16 @@ class KISApiHandler:
         """해외주식 실시간체결통보 구독 요청 문자열 생성"""
         return self._websocket.get_ccnl_notice_req(hts_id, tr_type)
 
-    async def connect_and_listen_ws(self, requests_payloads: list, callback):
+    async def connect_and_listen_ws(self, requests_payloads: list, callback, 
+                                   new_req_queue: Optional[asyncio.Queue] = None):
         """
         웹소켓 서버에 연결하여 실시간 데이터를 비동기 콜백으로 수신합니다.
-        :param requests_payloads: 구독 요청 JSON 리스트
+        :param requests_payloads: 초기 구독 요청 JSON 리스트
         :param callback: async def my_callback(data: str) 형식의 함수
+        :param new_req_queue: 추가 구독 요청을 담는 큐
         """
         if not self._websocket.approval_key:
             logger.warning("웹소켓 접속키가 없습니다. 자동으로 발급을 시도합니다.")
             self.connect_ws()
             
-        await self._websocket.connect_and_listen(requests_payloads, callback)
+        await self._websocket.connect_and_listen(requests_payloads, callback, new_req_queue)

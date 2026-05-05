@@ -68,9 +68,14 @@ class V1SmcBot(BaseStrategy):
 
         # 15분봉 캔들 캐시 (TP2 계산용)
         self._candles_15m: List[Dict[str, Any]] = []
+        
+        # 5분봉 기반 POI 구역 및 캔들 캐시
+        self._poi_zones_5m: List[Dict[str, Any]] = []
+        self._candles_5m: List[Dict[str, Any]] = []
 
         # 내부 제어 플래그
         self._running = False
+        self._is_ordering = False
 
     # ──────────────────────────────────────────────
     # [BaseStrategy 인터페이스 구현]
@@ -88,68 +93,15 @@ class V1SmcBot(BaseStrategy):
         self._state = BotState.SHUTDOWN
         logger.warning("=== 봇 종료 완료 ===")
 
-    async def run(self) -> None:
-        """
-        메인 비동기 루프를 시작합니다.
-        1) 토큰 발급 및 일일 잔고 스냅샷
-        2) 웹소켓 연결 및 감시 시작
-        3) Kill Switch 감시 루프 (백그라운드 태스크)
-        4) Standby 재계산 루프 (백그라운드 태스크)
-        """
-        self._running = True
-        logger.info(f"봇 시작: {self.excd}/{self.symbol}")
-
-        # ── 미국 정규장 대기 루프 외부 실행문 ──
-        # 정규장이 열릴 때까지 대기하다가 매일 장 시작 시 자동 재실행됩니다.
-        while self._running:
-            # 정규장 오픈까지 대기
-            await wait_for_market_open()
-
-            if not self._running:
-                break
-
-            logger.info(f"[장 시작] ET {now_et().strftime('%H:%M:%S')} — 하루 매매 시작")
-
-            # [인증] 액세스 토큰 + 웹소켓 접속키 발급
-            self._api.issue_access_token()
-            self._api.connect_ws()
-
-            # [0단계] 시작 잔고 스냅샷 (일일 초기화)
-            self._daily = DailyStats()
-            await self._stage0_snapshot_balance()
-
-            # [1단계] 15분봉 POI 설정
-            await self._stage1_setup_poi()
-
-            # 백그라운드 태스크 시작
-            kill_task    = asyncio.create_task(self._kill_switch_loop())
-            standby_task = asyncio.create_task(self._standby_recalc_loop())
-            close_task   = asyncio.create_task(self._market_close_watcher())
-
-            # 웹소켓 구독 요청 목록 생성
-            ws_requests = [
-                self._api.get_delayed_ccnl_req(self.symbol),
-                self._api.get_ccnl_notice_req(self.hts_id),
-            ]
-
-            logger.info("웹소켓 수신 루프 시작")
-            self._state = BotState.MONITORING
-
-            try:
-                await self._api.connect_and_listen_ws(ws_requests, self._ws_callback)
-            except Exception as e:
-                logger.error(f"웹소켓 도중 오류: {e}")
-            finally:
-                # 웹소켓 끝 나면 백그라운드 태스크 정리
-                for t in [kill_task, standby_task, close_task]:
-                    t.cancel()
-
-            if self._state == BotState.SHUTDOWN:
-                logger.warning("킬 스위치 발동 상태입니다. 차일 재시작도 중단합니다.")
-                break
-
-            logger.info("장 마감. 다음 장 오픈까지 대기합니다...")
-            # 다음 날 장 오픈까지 다시 반복
+    async def start_tasks(self) -> List[asyncio.Task]:
+        """봇의 백그라운드 태스크(킬 스위치, 정정계산 등)를 시작하고 리스트를 반환합니다."""
+        kill_task    = asyncio.create_task(self._kill_switch_loop())
+        standby_task = asyncio.create_task(self._standby_recalc_loop())
+        close_task   = asyncio.create_task(self._market_close_watcher())
+        
+        self._state = BotState.MONITORING
+        logger.info(f"[{self.symbol}] 백그라운드 태스크 시작 완료")
+        return [kill_task, standby_task, close_task]
 
     # ──────────────────────────────────────────────
     # [0단계] 킬 스위치 - 잔고 스냅샷 및 감시 루프
@@ -260,21 +212,23 @@ class V1SmcBot(BaseStrategy):
     # [2단계] 웹소켓 콜백 - 실시간 POI 터치 감시
     # ──────────────────────────────────────────────
 
-    async def _ws_callback(self, raw_data: str) -> None:
-        """
-        웹소켓에서 데이터가 수신될 때마다 호출되는 콜백 함수입니다.
-        TR_ID에 따라 분기하여 처리합니다.
-        """
-        # KIS 웹소켓은 '|' 구분자로 데이터를 전송합니다.
-        if not raw_data or raw_data.startswith("{"):
-            return  # 시스템 메시지(JSON) 무시
+    async def setup(self) -> None:
+        """봇 실행을 위한 초기 설정을 수행합니다."""
+        self._running = True
+        self._daily = DailyStats()
+        await self._stage0_snapshot_balance()
+        await asyncio.sleep(0.5) # API Rate limit 보호
+        await self._stage1_setup_poi()
 
-        parts = raw_data.split("|")
-        if len(parts) < 4:
+    async def process_ws_data(self, tr_id: str, tr_data: str) -> None:
+        """
+        중앙 매니저로부터 웹소켓 데이터를 전달받아 처리합니다.
+        
+        :param tr_id: 트랜잭션 ID (HDFSCNT0, H0GSCNI0 등)
+        :param tr_data: 실시간 데이터 본문
+        """
+        if self._state == BotState.SHUTDOWN:
             return
-
-        tr_id   = parts[1]
-        tr_data = parts[3]
 
         # 실시간 지연 체결가 수신 (HDFSCNT0)
         if tr_id == "HDFSCNT0":
@@ -292,109 +246,122 @@ class V1SmcBot(BaseStrategy):
             return
 
         if self._state == BotState.MONITORING:
-            # [2단계] POI 터치 여부 감시
+            # [2단계] 15분봉 POI 터치 여부 감시
             touched_zone = is_price_in_poi(price, self._poi_zones)
             if touched_zone:
-                logger.info(f"[2단계] POI 터치! → STANDBY 전환 (price={price:.4f})")
+                logger.info(f"[2단계] 15분봉 POI 터치! → STANDBY 전환 (price={price:.4f})")
                 self._state = BotState.STANDBY
+                # 즉시 5분봉 POI 탐지 실행
+                await self._update_5m_poi()
+                
+        elif self._state == BotState.STANDBY:
+            # [2.5단계] 5분봉 POI 터치 여부 감시
+            if not self._is_ordering and getattr(self, '_poi_zones_5m', []):
+                touched_zone = is_price_in_poi(price, self._poi_zones_5m)
+                if touched_zone:
+                    logger.info(f"[진입 신호] 5분봉 POI 터치! (price={price:.4f}) → 시장가 진입 실행")
+                    await self._execute_entry(price)
 
         elif self._state == BotState.IN_POSITION:
             # [5단계] TP/SL 감시 및 분할 청산
             await self._stage5_manage_position(price)
 
     # ──────────────────────────────────────────────
-    # [2.5단계] Standby 재계산 루프 (5분 주기)
+    # [2.5단계] Standby 5분봉 POI 재계산 및 진입 실행
     # ──────────────────────────────────────────────
+    
+    async def _update_5m_poi(self) -> None:
+        """5분봉 데이터를 조회하여 하위 POI(OB, FVG)를 최신화합니다."""
+        logger.info("[2.5단계] 5분봉 POI 재분석 시작...")
+        await asyncio.sleep(0.5) # API Rate limit 보호
+        res = await asyncio.to_thread(
+            self._api.get_time_itemchartprice,
+            self.excd, self.symbol,
+            "05", "1", str(ENTRY_CANDLE_COUNT_5M),
+        )
+        candles_5m = self._extract_candles(res)
+        if not candles_5m:
+            return
+            
+        self._candles_5m = candles_5m
+        
+        atr = calculate_atr(candles_5m)
+        fvg = detect_fvg(candles_5m, atr=atr)
+        ob = detect_ob(candles_5m, fvg)
+        
+        # 롱 전략이므로 Bullish(지지) 구역만 탐지
+        self._poi_zones_5m = [z for z in (fvg + ob) if z["type"] == "bullish"]
+        logger.info(f"[2.5단계] 5분봉 POI {len(self._poi_zones_5m)}개 갱신 완료")
 
     async def _standby_recalc_loop(self) -> None:
         """
-        STANDBY 상태에서 5분마다 최신 5분봉을 조회하여
-        SL/TP/수량을 재계산하고, 확정 진입 신호를 확인합니다.
+        STANDBY 상태에서 5분마다 최신 5분봉 POI를 갱신합니다.
+        실제 진입 감시는 웹소켓 실시간 가격 콜백에서 이루어집니다.
         """
         while self._running:
             await asyncio.sleep(STANDBY_RECALC_INTERVAL_SEC)
 
-            if self._state != BotState.STANDBY:
-                continue
+            if self._state == BotState.STANDBY:
+                await self._update_5m_poi()
 
-            logger.info("[2.5단계] 5분봉 재분석 시작...")
-
-            res = await asyncio.to_thread(
-                self._api.get_time_itemchartprice,
-                self.excd, self.symbol,
-                "05",                          # 5분봉
-                "1",
-                str(ENTRY_CANDLE_COUNT_5M),
-            )
-            candles_5m = self._extract_candles(res)
-
-            if not candles_5m:
-                continue
-
-            # 잔고 조회로 현재 전체 자본 확인
-            bal_res  = await asyncio.to_thread(
+    async def _execute_entry(self, entry_price: float) -> None:
+        """5분봉 POI 터치 시 SL, TP, 수량을 즉시 계산하고 진입합니다."""
+        if self._state != BotState.STANDBY or getattr(self, '_is_ordering', False):
+            return
+            
+        self._is_ordering = True
+        try:
+            # 잔고 조회
+            bal_res = await asyncio.to_thread(
                 self._api.inquire_overseas_present_balance,
                 self.acnt_no, self.acnt_prdt_cd
             )
-            capital  = self._parse_balance(bal_res)
+            capital = self._parse_balance(bal_res)
+            
+            if not self._candles_5m:
+                logger.warning("[2.5단계] 5분봉 캔들 데이터 없음, 진입 취소")
+                self._is_ordering = False
+                return
 
-            # 현재 호가(진입 예정가) 조회
-            price_res    = await asyncio.to_thread(self._api.get_price, self.excd, self.symbol)
-            entry_price  = self._parse_current_price(price_res)
-
-            if not entry_price:
-                continue
-
-            # SL, 수량, TP 계산
-            sl_price = calc_sl_price(candles_5m, direction="long")
+            sl_price = calc_sl_price(self._candles_5m, direction="long")
             if not sl_price or sl_price >= entry_price:
-                logger.warning("[2.5단계] 유효하지 않은 SL, 대기 유지")
-                continue
+                logger.warning(f"[2.5단계] 유효하지 않은 SL (SL={sl_price:.4f} >= 진입가={entry_price:.4f}), 진입 취소")
+                self._is_ordering = False
+                return
 
-            qty  = calc_qty(capital, TRADE_RISK_RATIO, entry_price, sl_price)
+            qty = calc_qty(capital, TRADE_RISK_RATIO, entry_price, sl_price)
+            if qty <= 0:
+                logger.warning("[2.5단계] 리스크 한도 초과 또는 잔고 부족으로 진입 수량 0주")
+                self._is_ordering = False
+                return
 
-            # 15분봉의 Bearish FVG를 TP2 2순위 후보로 전달
-            fvg_15m      = detect_fvg(self._candles_15m)
+            fvg_15m = detect_fvg(self._candles_15m)
             bearish_fvgs = [z for z in fvg_15m if z["type"] == "bearish"]
 
             tp1 = calc_tp1(entry_price, sl_price)
             tp2 = calc_tp2(entry_price, sl_price, self._candles_15m, bearish_fvgs)
 
-            # 임시로 포지션 정보에 저장 (실제 진입 전까지 업데이트됨)
-            self._pos.symbol      = self.symbol
-            self._pos.excd        = self.excd
+            # 포지션 정보 기록
+            self._pos.symbol = self.symbol
+            self._pos.excd = self.excd
             self._pos.entry_price = entry_price
-            self._pos.total_qty   = qty
+            self._pos.total_qty = qty
             self._pos.remaining_qty = qty
-            self._pos.sl_price    = sl_price
-            self._pos.tp1_price   = tp1
-            self._pos.tp2_price   = tp2
+            self._pos.sl_price = sl_price
+            self._pos.tp1_price = tp1
+            self._pos.tp2_price = tp2
 
             logger.info(
-                f"[2.5단계] 재계산 완료 → "
+                f"[진입 계산 완료] "
                 f"진입가={entry_price:.4f}, SL={sl_price:.4f}, "
                 f"TP1={tp1:.4f}, TP2={tp2:.4f}, 수량={qty}주"
             )
 
-            # 5분봉 확정 신호 확인 후 진입
-            if self._check_entry_signal(candles_5m):
-                await self._stage3_enter()
-
-    def _check_entry_signal(self, candles_5m: List[Dict[str, Any]]) -> bool:
-        """
-        5분봉 확정 진입 신호를 확인합니다.
-        - 마지막 캔들이 양봉(close > open)인 경우 진입 신호로 판단합니다.
-        - 이후 고도화 가능: 5분봉 FVG/OB 생성 여부 추가 확인 가능
-        """
-        if not candles_5m:
-            return False
-        last = candles_5m[-1]
-        try:
-            close = float(last.get("close", last.get("last", 0)))
-            open_ = float(last.get("open", last.get("oprc", 0)))
-            return close > open_
-        except (ValueError, TypeError):
-            return False
+            await self._stage3_enter()
+            
+        except Exception as e:
+            logger.error(f"[진입 에러] 5분봉 POI 터치 진입 중 에러 발생: {e}")
+            self._is_ordering = False
 
     # ──────────────────────────────────────────────
     # [3단계] 확정 진입 주문 실행
@@ -508,6 +475,8 @@ class V1SmcBot(BaseStrategy):
         else:
             # 포지션 정보 초기화 후 감시 재개
             self._pos   = PositionInfo()
+            self._is_ordering = False
+            self._poi_zones_5m = []
             self._state = BotState.MONITORING
             logger.info("[사이클 종료] 다음 매매 사이클 대기 시작 → MONITORING")
 
@@ -516,15 +485,30 @@ class V1SmcBot(BaseStrategy):
     # ──────────────────────────────────────────────
 
     def _market_sell(self, qty: int, reason: str = "") -> None:
-        """동기 방식으로 시장가 매도 주문을 실행합니다. (asyncio.to_thread 용)"""
-        logger.info(f"매도 주문: {self.symbol} {qty}주 ({reason})")
-        self._api.order_overseas_stock(
-            ord_dvsn=SELL_DVSN,
-            ovrs_excg_cd=self.excd,
-            pdno=self.symbol,
-            ft_ord_qty=str(qty),
-            ft_ord_unpr3="0",  # 시장가
-        )
+        """동기 방식으로 시장가 매도 주문을 실행합니다. (asyncio.to_thread 용) 통신 오류 방지를 위해 최대 3회 재시도합니다."""
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"매도 주문 시도 ({attempt}/3): {self.symbol} {qty}주 ({reason})")
+                res = self._api.order_overseas_stock(
+                    ord_dvsn=SELL_DVSN,
+                    ovrs_excg_cd=self.excd,
+                    pdno=self.symbol,
+                    ft_ord_qty=str(qty),
+                    ft_ord_unpr3="0",  # 시장가
+                )
+                # KIS API 응답 코드가 "0"이면 성공
+                if res.get("rt_cd") == "0":
+                    logger.info(f"매도 주문 성공: {self.symbol} {qty}주")
+                    return
+                else:
+                    logger.warning(f"매도 주문 응답 에러 ({attempt}/3): {res.get('msg1')}")
+            except Exception as e:
+                logger.error(f"매도 주문 통신 오류 ({attempt}/3): {e}")
+            
+            if attempt < 3:
+                time.sleep(1) # 1초 대기 후 재시도
+        
+        logger.critical(f"매도 주문 최종 실패 (3회 시도 초과): {self.symbol} {qty}주 미청산 상태입니다!")
 
     def _market_sell_all(self, reason: str = "") -> None:
         """전량 시장가 매도합니다."""

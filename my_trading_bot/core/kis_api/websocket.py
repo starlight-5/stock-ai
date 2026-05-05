@@ -1,7 +1,8 @@
+from __future__ import annotations
 import json
 import asyncio
 import websockets
-from typing import Dict, Any, Callable, Awaitable, List
+from typing import Dict, Any, Callable, Awaitable, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -63,39 +64,82 @@ class KISWebSocketHandler:
         """
         return self._build_request("H0GSCNI0", hts_id, tr_type)
 
-    async def connect_and_listen(self, requests_payloads: List[str], callback: Callable[[str], Awaitable[None]]):
+    async def connect_and_listen(self, requests_payloads: List[str], callback: Callable[[str], Awaitable[None]], 
+                                 new_req_queue: Optional[asyncio.Queue] = None):
         """
         웹소켓 서버에 연결하여 구독 요청을 보내고, 수신되는 실시간 데이터를 콜백 함수로 전달하는 메인 루프입니다.
         
-        :param requests_payloads: 구독할 요청 JSON 문자열 리스트
+        :param requests_payloads: 초기 구독할 요청 JSON 문자열 리스트
         :param callback: 데이터를 수신할 때마다 호출할 비동기(async) 콜백 함수
+        :param new_req_queue: 실행 중 추가될 구독 요청을 담는 큐 (Optional)
         """
         if not self.approval_key:
             logger.error("웹소켓 접속키(approval_key)가 설정되지 않았습니다.")
             return
 
-        logger.info(f"웹소켓 연결 시도: {self.ws_url}")
-        try:
-            # ping_interval/timeout 등은 KIS 서버 정책에 맞춰 튜닝
-            async with websockets.connect(self.ws_url, ping_interval=60) as websocket:
-                logger.info("웹소켓 연결 성공")
-                
-                # 구독 요청 전송
-                for req in requests_payloads:
-                    await websocket.send(req)
-                    logger.info(f"구독 요청 전송: {req}")
+        # 활성 구독 관리 (중복 제거 및 재접속 시 재전송 목적)
+        active_requests_dict = {}
+        for req in requests_payloads:
+            try:
+                d = json.loads(req)
+                tr_type = d.get("header", {}).get("tr_type", "1")
+                key = (d["body"]["input"]["tr_id"], d["body"]["input"]["tr_key"])
+                if tr_type == "1":
+                    active_requests_dict[key] = req
+                elif tr_type == "2":
+                    active_requests_dict.pop(key, None)
+            except Exception:
+                pass
+
+        while True:
+            logger.info(f"웹소켓 연결 시도: {self.ws_url}")
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=60) as websocket:
+                    logger.info("웹소켓 연결 성공")
                     
-                # 데이터 수신 무한 루프
-                while True:
+                    # 기존 활성 구독 요청 모두 전송 (재접속 포함)
+                    for req in active_requests_dict.values():
+                        await websocket.send(req)
+                        logger.info(f"구독 요청 전송: {req}")
+                        
+                    async def send_loop():
+                        """새로운 구독 요청이 큐에 들어오면 웹소켓으로 전송하는 루프"""
+                        if not new_req_queue:
+                            return
+                        while True:
+                            req = await new_req_queue.get()
+                            
+                            # 활성 구독 리스트 업데이트
+                            try:
+                                d = json.loads(req)
+                                tr_type = d.get("header", {}).get("tr_type", "1")
+                                key = (d["body"]["input"]["tr_id"], d["body"]["input"]["tr_key"])
+                                if tr_type == "1":
+                                    active_requests_dict[key] = req
+                                elif tr_type == "2":
+                                    active_requests_dict.pop(key, None)
+                            except Exception:
+                                pass
+                                
+                            await websocket.send(req)
+                            logger.info(f"추가 구독 요청 전송: {req}")
+                            new_req_queue.task_done()
+
+                    # 추가 요청 전송 루프를 백그라운드에서 실행
+                    sender_task = asyncio.create_task(send_loop())
+
+                    # 데이터 수신 루프
                     try:
-                        data = await websocket.recv()
-                        # 콜백 함수 실행
-                        await callback(data)
+                        while True:
+                            data = await websocket.recv()
+                            await callback(data)
                     except websockets.ConnectionClosed:
-                        logger.warning("웹소켓 연결이 종료되었습니다. (Connection Closed)")
-                        break
-                    except Exception as e:
-                        logger.error(f"웹소켓 수신 중 에러 발생: {e}")
-                        break
-        except Exception as e:
-            logger.error(f"웹소켓 연결 실패: {e}")
+                        logger.warning("웹소켓 연결이 종료되었습니다. (Connection Closed) 5초 후 재연결합니다.")
+                    finally:
+                        sender_task.cancel()
+                        
+            except Exception as e:
+                logger.error(f"웹소켓 통신 오류: {e}. 5초 후 재시도합니다.")
+            
+            # 재접속 전 5초 대기
+            await asyncio.sleep(5)

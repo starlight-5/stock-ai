@@ -76,12 +76,20 @@ def calc_qty(total_capital: float, risk_ratio: float, entry_price: float, sl_pri
     qty = risk_per_trade / price_diff
     qty_int = max(1, math.floor(qty))  # 소수점 버림 (보수적 수량), 최소 1주
 
+    # 마진 버퍼 적용: 시장가 진입 시 슬리피지를 고려해 자본금의 95% 이하로만 매수 가능
+    max_affordable_qty = math.floor((total_capital * 0.95) / entry_price)
+    final_qty = min(qty_int, max_affordable_qty)
+
+    if final_qty <= 0:
+        logger.error(f"마진 버퍼 초과 또는 자금 부족으로 진입 수량이 0입니다. (자본금: {total_capital:.2f})")
+        return 0
+
     logger.info(
-        f"수량 계산 완료: {qty_int}주 "
-        f"(자본={total_capital:.2f}, 리스크금액={risk_per_trade:.2f}, "
+        f"수량 계산 완료: {final_qty}주 "
+        f"(자본={total_capital:.2f}, 마진한도={max_affordable_qty}주, 리스크금액={risk_per_trade:.2f}, "
         f"진입가={entry_price:.4f}, SL={sl_price:.4f})"
     )
-    return qty_int
+    return final_qty
 
 
 def calc_tp1(entry_price: float, sl_price: float, rr: float = TP1_RR_RATIO, commission: float = COMMISSION_RATE) -> float:
