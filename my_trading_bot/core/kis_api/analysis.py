@@ -18,7 +18,7 @@ class KISAnalysisHandler(KISBaseClient):
 
     def _call_analysis_api(self, tr_id: str, url_path: str, params: Dict[str, Any], tr_cont: str = "") -> Dict[str, Any]:
         """시세 분석 공통 API 호출 헬퍼"""
-        headers = self.get_common_headers(tr_id)
+        headers = self._get_headers(tr_id)
         if tr_cont:
             headers["tr_cont"] = tr_cont
             
