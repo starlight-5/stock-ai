@@ -28,6 +28,20 @@ class RankScanner:
                 return val
         return ""
 
+    def _get_ranked_list(self, res: dict) -> list:
+        """
+        KIS 랭킹 API 응답에서 종목 목록을 안전하게 추출합니다.
+        KIS API는 주로 output1에 리스트를, output에 요약 딕셔너리를 반환합니다.
+        결과가 list가 아닐 경우 빈 리스트를 반환합니다.
+        """
+        # output1 우선 (KIS 랭킹 API 표준 필드), 없으면 output 시도
+        result = res.get("output1") or res.get("output")
+        if isinstance(result, list):
+            return result
+        # dict나 None이 반환된 경우 빈 리스트 반환
+        logger.debug(f"[Scanner] 예상치 못한 응답 타입: {type(result)}, 내용: {str(result)[:200]}")
+        return []
+
     def get_top_symbols(self, limit: int = 5) -> Set[Tuple[str, str]]:
         """
         거래량 상위 및 거래대금 상위 종목을 합쳐서 반환합니다.
@@ -43,7 +57,7 @@ class RankScanner:
                 # 1. 거래량 상위 조회
                 vol_res = self._api.get_trade_vol(excd=excd)
                 logger.debug(f"[Scanner] {excd} 거래량 응답: {str(vol_res)[:300]}")
-                vol_list = vol_res.get("output", vol_res.get("output1", []))
+                vol_list = self._get_ranked_list(vol_res)
                 for item in vol_list[:limit]:
                     symbol = self._extract_symbol(item)
                     if symbol:
@@ -52,7 +66,7 @@ class RankScanner:
                 # 2. 거래대금 상위 조회
                 pbmn_res = self._api.get_trade_pbmn(excd=excd)
                 logger.debug(f"[Scanner] {excd} 거래대금 응답: {str(pbmn_res)[:300]}")
-                pbmn_list = pbmn_res.get("output", pbmn_res.get("output1", []))
+                pbmn_list = self._get_ranked_list(pbmn_res)
                 for item in pbmn_list[:limit]:
                     symbol = self._extract_symbol(item)
                     if symbol:
