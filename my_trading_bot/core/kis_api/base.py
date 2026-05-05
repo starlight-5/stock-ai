@@ -3,7 +3,9 @@
 한국투자증권(KIS) API 통신을 위한 기본 클래스 모듈입니다.
 """
 import os
+import json
 import logging
+import requests
 from typing import Dict
 from dotenv import load_dotenv, find_dotenv
 
@@ -15,7 +17,7 @@ load_dotenv(find_dotenv())
 class KISBaseClient:
     """
     모든 KIS API 핸들러의 기본이 되는 클래스입니다.
-    기본 URL과 공통 헤더 생성 기능을 제공합니다.
+    공통 HTTP 요청(GET/POST) 메서드와 헤더 생성 기능을 제공합니다.
     """
     
     # 실전 및 모의 투자에 대한 Base URL
@@ -67,3 +69,76 @@ class KISBaseClient:
             "tr_id": tr_id,
             "custtype": "P" # P: 개인, B: 법인
         }
+
+    def _get(self, path: str, headers: Dict, params: Dict) -> Dict:
+        """
+        KIS API에 GET 요청을 보내는 공통 메서드입니다.
+        market.py, account.py 등 내부 핸들러에서 self._get() 형태로 호출합니다.
+        
+        Args:
+            path (str): API 경로 (예: /uapi/overseas-price/v1/quotations/price)
+            headers (Dict): 요청 헤더
+            params (Dict): 쿼리 파라미터
+            
+        Returns:
+            Dict: API 응답 딕셔너리 (실패 시 빈 딕셔너리)
+        """
+        url = f"{self.base_url}{path}"
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"GET 요청 실패 [{path}]: {response.status_code} - {response.text[:200]}")
+                return {}
+        except Exception as e:
+            logger.error(f"GET 요청 중 예외 발생 [{path}]: {e}")
+            return {}
+
+    def get_request(self, url: str, headers: Dict, params: Dict) -> Dict:
+        """
+        URL 전체를 받아 GET 요청을 보내는 공통 메서드입니다.
+        analysis.py 등 일부 핸들러와의 호환성을 위해 제공합니다.
+        
+        Args:
+            url (str): 요청 전체 URL
+            headers (Dict): 요청 헤더
+            params (Dict): 쿼리 파라미터
+            
+        Returns:
+            Dict: API 응답 딕셔너리 (실패 시 빈 딕셔너리)
+        """
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"GET 요청 실패: {response.status_code} - {response.text[:200]}")
+                return {}
+        except Exception as e:
+            logger.error(f"GET 요청 중 예외 발생: {e}")
+            return {}
+
+    def _post(self, path: str, headers: Dict, data: Dict) -> Dict:
+        """
+        KIS API에 POST 요청을 보내는 공통 메서드입니다.
+        
+        Args:
+            path (str): API 경로
+            headers (Dict): 요청 헤더
+            data (Dict): 요청 바디 데이터
+            
+        Returns:
+            Dict: API 응답 딕셔너리 (실패 시 빈 딕셔너리)
+        """
+        url = f"{self.base_url}{path}"
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(data), timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"POST 요청 실패 [{path}]: {response.status_code} - {response.text[:200]}")
+                return {}
+        except Exception as e:
+            logger.error(f"POST 요청 중 예외 발생 [{path}]: {e}")
+            return {}
