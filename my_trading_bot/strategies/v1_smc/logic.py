@@ -28,6 +28,11 @@ import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
+import numpy as np
+try:
+    import xgboost as xgb
+except ImportError:
+    xgb = None
 
 from ...core.api_handler import KISApiHandler
 from ..base import BaseStrategy
@@ -37,6 +42,7 @@ from .params import (
     KILL_SWITCH_CHECK_INTERVAL_SEC, STANDBY_RECALC_INTERVAL_SEC,
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT,
     TP1_CLOSE_RATIO, BUY_DVSN, SELL_DVSN, ORDER_TYPE_MARKET,
+    AI_PROB_THRESHOLD,
 )
 from .poi_detector import (
     detect_fvg, detect_ob, is_price_in_poi, calculate_atr, is_overlapping
@@ -56,7 +62,8 @@ class V1SmcBot(BaseStrategy):
     """
 
     def __init__(self, api: KISApiHandler, symbol: str, excd: str, hts_id: str,
-                 acnt_no: str = "", acnt_prdt_cd: str = "01", alpaca: Any = None):
+                 acnt_no: str = "", acnt_prdt_cd: str = "01", alpaca: Any = None,
+                 ai_model: Any = None):
         """
         :param api:          초기화된 KISApiHandler 인스턴스
         :param symbol:       거래 종목 코드 (예: "AAPL")
@@ -72,6 +79,7 @@ class V1SmcBot(BaseStrategy):
         self.acnt_no       = acnt_no
         self.acnt_prdt_cd  = acnt_prdt_cd
         self._alpaca       = alpaca
+        self._ai_model     = ai_model
         
         # 콜백 함수들
         self.on_state_change = None
@@ -122,12 +130,13 @@ class V1SmcBot(BaseStrategy):
         kill_task    = asyncio.create_task(self._kill_switch_loop())
         standby_task = asyncio.create_task(self._standby_recalc_loop())
         close_task   = asyncio.create_task(self._market_close_watcher())
+        poi_task     = asyncio.create_task(self._poi_update_loop())
         
         self._state = BotState.MONITORING
         if self.on_state_change:
             await self.on_state_change(self.symbol, self._state.value)
         logger.info(f"[{self.symbol}] 백그라운드 태스크 시작 완료")
-        return [kill_task, standby_task, close_task]
+        return [kill_task, standby_task, close_task, poi_task]
 
     async def run(self) -> None:
         """
@@ -185,6 +194,25 @@ class V1SmcBot(BaseStrategy):
         self._daily.current_balance  = balance
         logger.info(f"[0단계] 최종 시작 잔고 스냅샷: ${balance:,.2f}")
 
+    async def _poi_update_loop(self) -> None:
+        """[주기적 갱신] 5분마다 최신 차트를 조회하여 POI를 재설정합니다."""
+        while self._running:
+            try:
+                await asyncio.sleep(300) # 5분 대기
+                
+                # MONITORING 상태일 때만 갱신 (이미 진입 중이거나 대기 중일 때는 건너뜀)
+                if self._state == BotState.MONITORING:
+                    logger.info(f"[{self.symbol}] 5분 주기 POI 최신화 시작...")
+                    await self._stage1_setup_poi()
+                else:
+                    logger.debug(f"[{self.symbol}] 현재 상태({self._state.value})가 MONITORING이 아니므로 POI 갱신을 건너뜁니다.")
+            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.symbol}] POI 갱신 루프 중 오류: {e}")
+                await asyncio.sleep(60) # 에러 시 1분 후 재시도
+
     async def _kill_switch_loop(self) -> None:
         """
         주기적으로 잔고를 조회하고, 누적 손실이 한도를 초과하면 킬 스위치를 발동합니다.
@@ -240,10 +268,11 @@ class V1SmcBot(BaseStrategy):
                 logger.info("[장 마감 임박] 30분 전 — 신규 진입을 차단합니다.")
                 self._state = BotState.IDLE
 
-    # ──────────────────────────────────────────────
-    # [1단계] 15분봉 POI 설정
-    # ──────────────────────────────────────────────
-
+    async def _stage1_setup_poi(self) -> None:
+        """[1단계] 5분봉 데이터를 조회하여 초기 POI(OB/FVG)를 설정합니다."""
+        logger.info(f"[{self.symbol}] 1단계: 초기 POI 탐지 시작 (거래소: {self.excd}, 개수: {POI_CANDLE_COUNT})")
+        
+        # 5분봉 조회 (KIS)
         res = await asyncio.to_thread(
             self._api.get_time_itemchartprice,
             self.excd, self.symbol,
@@ -253,7 +282,11 @@ class V1SmcBot(BaseStrategy):
         )
 
         candles = self._extract_candles(res)
-        self._candles_poi = candles
+        if not candles or len(candles) == 0:
+            logger.warning(f"[{self.symbol}] KIS 데이터 반환 결과가 0개입니다. (응답 메시지: {res.get('msg1')})")
+            self._candles_poi = []
+        else:
+            self._candles_poi = candles
 
         # Alpaca를 통한 데이터 보완 (KIS 데이터 부족 시)
         if (not candles or len(candles) < ATR_PERIOD + 1) and self._alpaca:
@@ -283,8 +316,6 @@ class V1SmcBot(BaseStrategy):
         logger.info(f"[1단계] POI {len(self._poi_zones)}개 설정 완료")
         for i, zone in enumerate(self._poi_zones):
             logger.info(f"  - POI #{i+1}: [{zone['type_label']}] 범위: {zone['low']:.4f} ~ {zone['high']:.4f}")
-
-
     # ──────────────────────────────────────────────
     # [2단계] 웹소켓 콜백 - 실시간 POI 터치 감시
     # ──────────────────────────────────────────────
@@ -432,6 +463,24 @@ class V1SmcBot(BaseStrategy):
             
         self._is_ordering = True
         try:
+            # AI 필터링 (XGBoost)
+            if self._ai_model:
+                features = self._calculate_indicators(self._candles_entry)
+                if features:
+                    # XGBoost 예측을 위한 DMatrix 생성
+                    dmat = xgb.DMatrix(np.array([list(features.values())]))
+                    prob = self._ai_model.predict(dmat)[0]
+                    
+                    if prob < AI_PROB_THRESHOLD:
+                        logger.warning(
+                            f"[{self.symbol}] AI 필터 진입 거절: 승률 예측 {prob:.2%} < 기준 {AI_PROB_THRESHOLD:.2%}"
+                        )
+                        self._is_ordering = False
+                        self._state = BotState.MONITORING # 다시 감시 상태로
+                        return
+                    else:
+                        logger.info(f"[{self.symbol}] AI 필터 진입 승인: 승률 예측 {prob:.2%}")
+
             # 잔고 조회
             bal_res = await asyncio.to_thread(
                 self._api.inquire_overseas_present_balance,
@@ -641,12 +690,73 @@ class V1SmcBot(BaseStrategy):
         if self._pos.remaining_qty > 0:
             self._market_sell(self._pos.remaining_qty, reason)
 
+    def _calculate_indicators(self, candles: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        """AI 학습에 필요한 기술적 지표를 계산합니다."""
+        if len(candles) < 20: return None
+        try:
+            closes = [float(c.get("close", c.get("last", 0))) for c in candles]
+            highs = [float(c.get("high", c.get("hipr", 0))) for c in candles]
+            lows = [float(c.get("low", c.get("lopr", 0))) for c in candles]
+            volumes = [float(c.get("volume", c.get("tvol", 0))) for c in candles]
+            
+            # 1. RSI (14)
+            delta = np.diff(closes)
+            gain = (delta > 0) * delta
+            loss = (delta < 0) * -delta
+            avg_gain = np.mean(gain[-14:])
+            avg_loss = np.mean(loss[-14:])
+            rsi = 100 - (100 / (1 + (avg_gain / (avg_loss + 1e-9))))
+            
+            # 2. ATR (14)
+            tr = np.maximum(np.array(highs[1:]) - np.array(lows[1:]), 
+                            np.abs(np.array(highs[1:]) - np.array(closes[:-1])),
+                            np.abs(np.array(lows[1:]) - np.array(closes[:-1])))
+            atr = np.mean(tr[-14:])
+            
+            # 3. 거래량 변화율 (최근 5봉 vs 이전 15봉)
+            vol_sma_short = np.mean(volumes[-5:])
+            vol_sma_long = np.mean(volumes[-20:])
+            vol_ratio = vol_sma_short / (vol_sma_long + 1e-9)
+            
+            # 4. 이격도 (20일 이평선 기준)
+            sma20 = np.mean(closes[-20:])
+            disparity = (closes[-1] / sma20) * 100
+            
+            # 5. 변동성 (ATR / Price)
+            volatility = atr / closes[-1]
+            
+            return {
+                "rsi": rsi, "atr": atr, "vol_ratio": vol_ratio,
+                "disparity": disparity, "volatility": volatility
+            }
+        except Exception as e:
+            logger.error(f"지표 계산 중 오류: {e}")
+            return None
+
     def _extract_candles(self, res: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """KIS API 응답에서 캔들 리스트를 추출합니다."""
+        """KIS API 응답에서 캔들 리스트를 추출하고 필드명을 표준화합니다."""
         output = res.get("output2", res.get("output", []))
-        if isinstance(output, list):
-            return output
-        return []
+        if not isinstance(output, list):
+            return []
+            
+        normalized = []
+        for c in output:
+            try:
+                # KIS 필드명을 표준 이름으로 매핑 (문자열인 경우 float 변환)
+                candle = {
+                    "open": float(c.get("stck_oprc", c.get("open", 0))),
+                    "high": float(c.get("stck_hgpr", c.get("high", 0))),
+                    "low": float(c.get("stck_lwpr", c.get("low", 0))),
+                    "close": float(c.get("stck_clpr", c.get("close", 0))),
+                    "volume": float(c.get("tvol", c.get("volume", 0))),
+                    "time": c.get("stck_cntg_hour", c.get("time", ""))
+                }
+                normalized.append(candle)
+            except (ValueError, TypeError):
+                continue
+                
+        # 시간순으로 정렬 (KIS는 보통 최신순으로 줌)
+        return sorted(normalized, key=lambda x: x["time"])
 
     def _parse_balance(self, res: Dict[str, Any]) -> float:
         """

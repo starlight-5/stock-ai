@@ -28,6 +28,19 @@ class NotionLogger:
         }
         self.base_url = "https://api.notion.com/v1"
         self.db_id: Optional[str] = None
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """세션이 없으면 생성하여 반환합니다."""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(headers=self.headers)
+        return self.session
+
+    async def close(self):
+        """네트워크 세션을 안전하게 닫습니다."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            logger.info("[Notion] 세션 종료 완료")
 
     async def initialize(self):
         """대시보드 구조 초기화 및 데이터베이스 연결을 확인합니다."""
@@ -36,26 +49,26 @@ class NotionLogger:
             return
 
         try:
-            async with aiohttp.ClientSession(headers=self.headers) as session:
-                # 1. 페이지 내 자식 블록 조회하여 데이터베이스가 있는지 확인
-                url = f"{self.base_url}/blocks/{self.page_id}/children"
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        logger.error(f"[Notion] 페이지 조회 실패: {await resp.text()}")
-                        return
-                    data = await resp.json()
-                    blocks = data.get("results", [])
+            session = await self._get_session()
+            # 1. 페이지 내 자식 블록 조회하여 데이터베이스가 있는지 확인
+            url = f"{self.base_url}/blocks/{self.page_id}/children"
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.error(f"[Notion] 페이지 조회 실패: {await resp.text()}")
+                    return
+                data = await resp.json()
+                blocks = data.get("results", [])
 
-                for block in blocks:
-                    if block["type"] == "child_database":
-                        if "종목 상태" in block["child_database"]["title"]:
-                            self.db_id = block["id"]
-                            logger.info(f"[Notion] 기존 데이터베이스 연결 성공: {self.db_id}")
-                            break
-                
-                # 2. 데이터베이스가 없으면 생성
-                if not self.db_id:
-                    await self._create_status_database(session)
+            for block in blocks:
+                if block["type"] == "child_database":
+                    if "종목 상태" in block["child_database"]["title"]:
+                        self.db_id = block["id"]
+                        logger.info(f"[Notion] 기존 데이터베이스 연결 성공: {self.db_id}")
+                        break
+            
+            # 2. 데이터베이스가 없으면 생성
+            if not self.db_id:
+                await self._create_status_database(session)
                     
         except Exception as e:
             logger.error(f"[Notion] 초기화 중 오류 발생: {e}")
@@ -100,45 +113,45 @@ class NotionLogger:
             return
 
         try:
-            async with aiohttp.ClientSession(headers=self.headers) as session:
-                # 1. 해당 종목의 행(Page)이 있는지 쿼리
-                query_url = f"{self.base_url}/databases/{self.db_id}/query"
-                query_payload = {
-                    "filter": {
-                        "property": "Name",
-                        "title": {"equals": symbol}
+            session = await self._get_session()
+            # 1. 해당 종목의 행(Page)이 있는지 쿼리
+            query_url = f"{self.base_url}/databases/{self.db_id}/query"
+            query_payload = {
+                "filter": {
+                    "property": "Name",
+                    "title": {"equals": symbol}
+                }
+            }
+            async with session.post(query_url, json=query_payload) as resp:
+                data = await resp.json()
+                results = data.get("results", [])
+
+            properties = {
+                "State": {"select": {"name": state}},
+                "Position": {"number": position},
+                "EntryPrice": {"number": entry_price},
+                "Symbol": {"rich_text": [{"text": {"content": symbol}}]}
+            }
+
+            if results:
+                # 기존 행 업데이트
+                page_id = results[0]["id"]
+                update_url = f"{self.base_url}/pages/{page_id}"
+                await session.patch(update_url, json={"properties": properties})
+            else:
+                # 새 행 추가
+                create_url = f"{self.base_url}/pages"
+                new_payload = {
+                    "parent": {"database_id": self.db_id},
+                    "properties": {
+                        "Name": {"title": [{"text": {"content": symbol}}]},
+                        **properties
                     }
                 }
-                async with session.post(query_url, json=query_payload) as resp:
-                    data = await resp.json()
-                    results = data.get("results", [])
-
-                properties = {
-                    "State": {"select": {"name": state}},
-                    "Position": {"number": position},
-                    "EntryPrice": {"number": entry_price},
-                    "Symbol": {"rich_text": [{"text": {"content": symbol}}]}
-                }
-
-                if results:
-                    # 기존 행 업데이트
-                    page_id = results[0]["id"]
-                    update_url = f"{self.base_url}/pages/{page_id}"
-                    await session.patch(update_url, json={"properties": properties})
-                else:
-                    # 새 행 추가
-                    create_url = f"{self.base_url}/pages"
-                    new_payload = {
-                        "parent": {"database_id": self.db_id},
-                        "properties": {
-                            "Name": {"title": [{"text": {"content": symbol}}]},
-                            **properties
-                        }
-                    }
-                    await session.post(create_url, json=new_payload)
-                
-                # 요약 시간도 업데이트
-                await self.update_summary_time(session)
+                await session.post(create_url, json=new_payload)
+            
+            # 요약 시간도 업데이트
+            await self.update_summary_time(session)
                 
         except Exception as e:
             logger.error(f"[Notion] 종목 상태 업데이트 중 오류: {e}")
@@ -169,26 +182,26 @@ class NotionLogger:
             return
 
         try:
-            async with aiohttp.ClientSession(headers=self.headers) as session:
-                now_str = datetime.now().strftime("%H:%M:%S")
-                # details를 보기 좋게 문자열로 변환
-                detail_str = f"가격: {details.get('price', 0):.2f}, 수량: {details.get('qty', 0)}"
-                log_text = f"[{now_str}] {symbol:8} | {trade_type:10} | {detail_str}"
-                
-                url = f"{self.base_url}/blocks/{self.page_id}/children"
-                payload = {
-                    "children": [
-                        {
-                            "bulleted_list_item": {
-                                "rich_text": [
-                                    {"text": {"content": log_text}, "annotations": {"code": True}}
-                                ]
-                            }
+            session = await self._get_session()
+            now_str = datetime.now().strftime("%H:%M:%S")
+            # details를 보기 좋게 문자열로 변환
+            detail_str = f"가격: {details.get('price', 0):.2f}, 수량: {details.get('qty', 0)}"
+            log_text = f"[{now_str}] {symbol:8} | {trade_type:10} | {detail_str}"
+            
+            url = f"{self.base_url}/blocks/{self.page_id}/children"
+            payload = {
+                "children": [
+                    {
+                        "bulleted_list_item": {
+                            "rich_text": [
+                                {"text": {"content": log_text}, "annotations": {"code": True}}
+                            ]
                         }
-                    ]
-                }
-                async with session.patch(url, json=payload) as resp:
-                    if resp.status != 200:
-                        logger.error(f"[Notion] 로그 추가 실패: {await resp.text()}")
+                    }
+                ]
+            }
+            async with session.patch(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"[Notion] 로그 추가 실패: {await resp.text()}")
         except Exception as e:
             logger.error(f"[Notion] 로그 추가 중 오류 발생: {e}")

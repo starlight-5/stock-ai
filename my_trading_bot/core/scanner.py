@@ -12,20 +12,24 @@ logger = logging.getLogger(__name__)
 
 # KIS API 응답에서 종목 코드를 가져오기 위해 시도할 키 이름 목록 (우선순위 순)
 _SYMBOL_KEYS = ["symb", "rsym", "symbol", "SYMB", "RSYM"]
+_NAME_KEYS = ["name", "hname", "NAME", "HNAME", "knam"]
 
 class RankScanner:
     def __init__(self, api: KISApiHandler):
         self._api = api
 
     def _extract_symbol(self, item: Dict) -> str:
-        """
-        API 응답 항목에서 종목 코드를 추출합니다.
-        KIS API 버전에 따라 필드명이 다를 수 있어 여러 키를 순서대로 시도합니다.
-        """
+        """API 응답 항목에서 종목 코드를 추출합니다."""
         for key in _SYMBOL_KEYS:
             val = item.get(key)
-            if val:
-                return val
+            if val: return val.strip()
+        return ""
+
+    def _extract_name(self, item: Dict) -> str:
+        """API 응답 항목에서 종목명(한글/영문)을 추출합니다."""
+        for key in _NAME_KEYS:
+            val = item.get(key)
+            if val: return val.strip().upper()
         return ""
 
     def _get_ranked_list(self, res: dict) -> list:
@@ -56,21 +60,39 @@ class RankScanner:
             try:
                 # 1. 거래량 상위 조회
                 vol_res = self._api.get_trade_vol(excd=excd)
-                logger.debug(f"[Scanner] {excd} 거래량 응답: {str(vol_res)[:300]}")
                 vol_list = self._get_ranked_list(vol_res)
-                for item in vol_list[:limit]:
+                count = 0
+                for item in vol_list:
+                    if count >= limit: break
                     symbol = self._extract_symbol(item)
+                    name = self._extract_name(item)
+                    
+                    # ETF 필터링
+                    if "ETF" in name:
+                        logger.debug(f"[Scanner] ETF 제외: {symbol} ({name})")
+                        continue
+                        
                     if symbol:
                         symbols.add((excd, symbol))
+                        count += 1
                         
                 # 2. 거래대금 상위 조회
                 pbmn_res = self._api.get_trade_pbmn(excd=excd)
-                logger.debug(f"[Scanner] {excd} 거래대금 응답: {str(pbmn_res)[:300]}")
                 pbmn_list = self._get_ranked_list(pbmn_res)
-                for item in pbmn_list[:limit]:
+                count = 0
+                for item in pbmn_list:
+                    if count >= limit: break
                     symbol = self._extract_symbol(item)
+                    name = self._extract_name(item)
+                    
+                    # ETF 필터링
+                    if "ETF" in name:
+                        logger.debug(f"[Scanner] ETF 제외: {symbol} ({name})")
+                        continue
+                        
                     if symbol:
                         symbols.add((excd, symbol))
+                        count += 1
                 
             except Exception as e:
                 logger.error(f"[Scanner] {excd} 종목 스캔 중 오류 발생: {e}")

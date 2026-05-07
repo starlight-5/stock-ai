@@ -67,6 +67,7 @@ class AlpacaHandler:
                             "high":  float(b["h"]),
                             "low":   float(b["l"]),
                             "close": float(b["c"]),
+                            "volume": float(b["v"]), # 거래량 필드 추가
                             "time":  b["t"]
                         })
                     

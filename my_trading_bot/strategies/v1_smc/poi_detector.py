@@ -167,7 +167,7 @@ def detect_fvg(
                     "atr":        atr,
                 })
 
-    logger.info(f"FVG 탐지 완료: {len(fvg_zones)}개 발견 (필터: {filter_mode})")
+    logger.debug(f"FVG 탐지 완료: {len(fvg_zones)}개 발견 (필터: {filter_mode})")
     return fvg_zones
 
 
@@ -284,7 +284,7 @@ def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]
                     "is_doji":    is_doji,
                 })
 
-    logger.info(f"OB 탐지 완료: {len(ob_zones)}개 발견")
+    logger.debug(f"OB 탐지 완료: {len(ob_zones)}개 발견")
     return ob_zones
 
 
@@ -319,7 +319,7 @@ def is_price_in_poi(current_price: float, poi_zones: List[Dict[str, Any]]) -> Op
         # Bullish(매수 구역)인 경우: 가격이 상단을 터치하거나 아래로 내려왔을 때
         if zone["type"] == "bullish":
             if current_price <= zone["top"]:
-                logger.info(
+                logger.debug(
                     f"Bullish POI 터치! 가격={current_price:.4f} <= 상단={zone['top']:.4f} "
                     f"({zone['type_label']})"
                 )
@@ -328,7 +328,7 @@ def is_price_in_poi(current_price: float, poi_zones: List[Dict[str, Any]]) -> Op
         # Bearish(매도 구역)인 경우: 가격이 하단을 터치하거나 위로 올라왔을 때
         elif zone["type"] == "bearish":
             if current_price >= zone["bottom"]:
-                logger.info(
+                logger.debug(
                     f"Bearish POI 터치! 가격={current_price:.4f} >= 하단={zone['bottom']:.4f} "
                     f"({zone['type_label']})"
                 )

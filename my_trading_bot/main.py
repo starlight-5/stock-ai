@@ -23,6 +23,12 @@ from my_trading_bot.utils.notion_logger import NotionLogger
 from my_trading_bot.utils.discord_logger import DiscordLogger
 from my_trading_bot.core.alpaca_handler import AlpacaHandler
 
+try:
+    import xgboost as xgb
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class SymbolManager:
@@ -36,6 +42,20 @@ class SymbolManager:
         self.scanner = RankScanner(api)
         self.bots: Dict[str, V1SmcBot] = {}
         self.bot_tasks: Dict[str, List[asyncio.Task]] = {}
+        
+        # AI 모델 로드
+        self.ai_model = None
+        if AI_AVAILABLE:
+            model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "smc_ai_filter.json")
+            if os.path.exists(model_path):
+                try:
+                    self.ai_model = xgb.Booster()
+                    self.ai_model.load_model(model_path)
+                    logger.info(f"[Manager] AI 모델 로드 완료: {model_path}")
+                except Exception as e:
+                    logger.error(f"[Manager] AI 모델 로드 실패: {e}")
+            else:
+                logger.warning(f"[Manager] AI 모델 파일이 없습니다: {model_path}. 필터 없이 작동합니다.")
         
         # Notion 로거 설정
         notion_token = os.getenv("NOTION_TOKEN", "")
@@ -143,7 +163,8 @@ class SymbolManager:
                                 hts_id=self.hts_id,
                                 acnt_no=self.acnt_no,
                                 acnt_prdt_cd=self.acnt_prdt,
-                                alpaca=self.alpaca
+                                alpaca=self.alpaca,
+                                ai_model=self.ai_model
                             )
                             # 콜백 설정
                             bot.on_state_change = self._on_bot_state_change
@@ -248,6 +269,8 @@ class SymbolManager:
         self._running = False
         for bot in self.bots.values():
             await bot.shutdown()
+        # Notion 세션 닫기
+        await self.notion.close()
 
 async def main():
     load_dotenv(find_dotenv())
@@ -271,7 +294,9 @@ async def main():
 
     try:
         await manager.run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("[Main] 중단 요청 감지. 종료 절차를 시작합니다...")
+    finally:
         await manager.shutdown()
 
 if __name__ == "__main__":

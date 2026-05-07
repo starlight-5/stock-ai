@@ -101,6 +101,7 @@ class KISMarketHandler(KISBaseClient):
             "NCNT": ncnt,
             "NEXT": dtm, # NEXT(KEYB) OR DTM
             "KEYB": keyb,
+            "FILL": "Y",  # 필수 필드: 빈 구간 채우기 여부 (Y: 채움)
             "NREC": "120"
         }
         return self._call_market_api(path, tr_id, params)
