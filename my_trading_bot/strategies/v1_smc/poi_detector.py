@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-15분봉/5분봉 캔들 데이터를 분석하여
+5분봉/1분봉 캔들 데이터를 분석하여
 FVG(Fair Value Gap)와 OB(Order Block) 구역을 탐지하는 모듈입니다.
 
 [FVG 탐지 원리]
@@ -132,13 +132,17 @@ def detect_fvg(
             valid = (gap_size >= min_gap) if use_atr else (gap_size / prev["close"] >= min_size_ratio)
             if valid:
                 fvg_zones.append({
-                    "type":     "bullish",
-                    "top":      gap_top,
-                    "bottom":   gap_bottom,
-                    "mid":      (gap_top + gap_bottom) / 2,
-                    "index":    i,
-                    "gap_size": gap_size,
-                    "atr":      atr,
+                    "type":       "bullish",
+                    "type_label": "Bullish FVG",
+                    "top":        gap_top,
+                    "bottom":     gap_bottom,
+                    "low":        gap_bottom, # logic.py 로깅용
+                    "high":       gap_top,    # logic.py 로깅용
+                    "mid":        (gap_top + gap_bottom) / 2,
+                    "index":      i,
+                    "origin":     "fvg",
+                    "gap_size":   gap_size,
+                    "atr":        atr,
                 })
 
         # ─── 하락 FVG: 세 번째 고가 < 첫 번째 저가 ───
@@ -150,13 +154,17 @@ def detect_fvg(
             valid = (gap_size >= min_gap) if use_atr else (gap_size / prev["close"] >= min_size_ratio)
             if valid:
                 fvg_zones.append({
-                    "type":     "bearish",
-                    "top":      gap_top,
-                    "bottom":   gap_bottom,
-                    "mid":      (gap_top + gap_bottom) / 2,
-                    "index":    i,
-                    "gap_size": gap_size,
-                    "atr":      atr,
+                    "type":       "bearish",
+                    "type_label": "Bearish FVG",
+                    "top":        gap_top,
+                    "bottom":     gap_bottom,
+                    "low":        gap_bottom, # logic.py 로깅용
+                    "high":       gap_top,    # logic.py 로깅용
+                    "mid":        (gap_top + gap_bottom) / 2,
+                    "index":      i,
+                    "origin":     "fvg",
+                    "gap_size":   gap_size,
+                    "atr":        atr,
                 })
 
     logger.info(f"FVG 탐지 완료: {len(fvg_zones)}개 발견 (필터: {filter_mode})")
@@ -240,13 +248,16 @@ def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]
 
             if is_bearish_candle or lower_wick_dominant:
                 ob_zones.append({
-                    "type":    "bullish",
-                    "top":     ob_candle["high"],
-                    "bottom":  ob_candle["low"],
-                    "mid":     (ob_candle["high"] + ob_candle["low"]) / 2,
-                    "index":   ob_index,
-                    "origin":  "ob",
-                    "is_doji": is_doji,
+                    "type":       "bullish",
+                    "type_label": "Bullish OB",
+                    "top":        ob_candle["high"],
+                    "bottom":     ob_candle["low"],
+                    "low":        ob_candle["low"],  # logic.py 로깅용
+                    "high":       ob_candle["high"], # logic.py 로깅용
+                    "mid":        (ob_candle["high"] + ob_candle["low"]) / 2,
+                    "index":      ob_index,
+                    "origin":     "ob",
+                    "is_doji":    is_doji,
                 })
 
         elif fvg["type"] == "bearish":
@@ -261,13 +272,16 @@ def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]
 
             if is_bullish_candle or upper_wick_dominant:
                 ob_zones.append({
-                    "type":    "bearish",
-                    "top":     ob_candle["high"],
-                    "bottom":  ob_candle["low"],
-                    "mid":     (ob_candle["high"] + ob_candle["low"]) / 2,
-                    "index":   ob_index,
-                    "origin":  "ob",
-                    "is_doji": is_doji,
+                    "type":       "bearish",
+                    "type_label": "Bearish OB",
+                    "top":        ob_candle["high"],
+                    "bottom":     ob_candle["low"],
+                    "low":        ob_candle["low"],  # logic.py 로깅용
+                    "high":       ob_candle["high"], # logic.py 로깅용
+                    "mid":        (ob_candle["high"] + ob_candle["low"]) / 2,
+                    "index":      ob_index,
+                    "origin":     "ob",
+                    "is_doji":    is_doji,
                 })
 
     logger.info(f"OB 탐지 완료: {len(ob_zones)}개 발견")
@@ -275,21 +289,51 @@ def detect_ob(candles_raw: List[Dict[str, Any]], fvg_zones: List[Dict[str, Any]]
 
 
 
+def is_overlapping(zone1: Dict[str, Any], zone2: Dict[str, Any]) -> bool:
+    """
+    두 구역(zone)이 서로 겹치는지(Overlap) 확인합니다.
+    SMC 전략에서 상위 POI(5분봉)와 하위 POI(1분봉)의 유효 중첩을 판정할 때 사용합니다.
+
+    공식: max(Bottom1, Bottom2) < min(Top1, Top2)
+    """
+    bottom1, top1 = zone1["bottom"], zone1["top"]
+    bottom2, top2 = zone2["bottom"], zone2["top"]
+    
+    return max(bottom1, bottom2) < min(top1, top2)
+
+
 def is_price_in_poi(current_price: float, poi_zones: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
-    현재 가격이 어떤 POI(관심 구역) 안에 있는지 확인합니다.
+    현재 가격이 어떤 POI(관심 구역)를 터치하거나 그 안에 있는지 확인합니다.
+    시장의 노이즈와 슬리피지를 고려하여 판정 기준을 완화(Penetration 기준)합니다.
+
+    [판정 기준]
+    - Bullish(매수): 현재가 <= 구역 상단(top)
+    - Bearish(매도): 현재가 >= 구역 하단(bottom)
 
     :param current_price: 현재 실시간 체결가
     :param poi_zones: FVG 또는 OB 구역 목록
-    :return: 현재 가격이 들어간 첫 번째 POI 구역. 없으면 None.
+    :return: 현재 가격이 진입한 첫 번째 POI 구역. 없으면 None.
     """
     for zone in poi_zones:
-        if zone["bottom"] <= current_price <= zone["top"]:
-            logger.info(
-                f"POI 터치 감지! 가격={current_price:.4f} "
-                f"| 구역 [{zone['bottom']:.4f} ~ {zone['top']:.4f}] (type={zone['type']})"
-            )
-            return zone
+        # Bullish(매수 구역)인 경우: 가격이 상단을 터치하거나 아래로 내려왔을 때
+        if zone["type"] == "bullish":
+            if current_price <= zone["top"]:
+                logger.info(
+                    f"Bullish POI 터치! 가격={current_price:.4f} <= 상단={zone['top']:.4f} "
+                    f"({zone['type_label']})"
+                )
+                return zone
+        
+        # Bearish(매도 구역)인 경우: 가격이 하단을 터치하거나 위로 올라왔을 때
+        elif zone["type"] == "bearish":
+            if current_price >= zone["bottom"]:
+                logger.info(
+                    f"Bearish POI 터치! 가격={current_price:.4f} >= 하단={zone['bottom']:.4f} "
+                    f"({zone['type_label']})"
+                )
+                return zone
+                
     return None
 
 

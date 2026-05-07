@@ -22,23 +22,23 @@ from .poi_detector import find_nearest_liquidity
 logger = logging.getLogger(__name__)
 
 
-def calc_sl_price(candles_5m: List[Dict[str, Any]], direction: str = "long") -> Optional[float]:
+def calc_sl_price(candles_entry: List[Dict[str, Any]], direction: str = "long") -> Optional[float]:
     """
-    5분봉에서 신호 캔들(FVG/OB를 형성한 캔들)의 꼬리를 손절 라인으로 설정합니다.
+    진입 타임프레임(예: 1분봉)에서 신호 캔들(FVG/OB를 형성한 캔들)의 꼬리를 손절 라인으로 설정합니다.
     
     - 롱(매수) 방향: 신호 캔들의 저가(low)를 SL로 사용
     - 숏(매도) 방향: 신호 캔들의 고가(high)를 SL로 사용
     
-    :param candles_5m: 5분봉 캔들 원시 데이터 리스트 (최신 순 또는 오래된 순)
+    :param candles_entry: 진입 타임프레임 캔들 원시 데이터 리스트
     :param direction: 매매 방향 ('long' 또는 'short')
     :return: 손절가 (float), 계산 불가 시 None
     """
-    if not candles_5m:
+    if not candles_entry:
         logger.warning("SL 계산 실패: 캔들 데이터가 없습니다.")
         return None
 
     # 가장 최근 신호 캔들을 기준으로 사용 (리스트의 마지막 캔들)
-    signal_candle = candles_5m[-1]
+    signal_candle = candles_entry[-1]
     try:
         if direction == "long":
             # 롱 진입: 최근 신호 캔들의 저가가 손절 라인
@@ -118,7 +118,7 @@ def calc_tp1(entry_price: float, sl_price: float, rr: float = TP1_RR_RATIO, comm
 def calc_tp2(
     entry_price: float,
     sl_price: float,
-    candles_15m: List[Dict[str, Any]],
+    candles_poi: List[Dict[str, Any]],
     bearish_fvg_zones: Optional[List[Dict[str, Any]]] = None,
     fallback_rr: float = TP2_RR_RATIO_FALLBACK,
 ) -> float:
@@ -131,7 +131,7 @@ def calc_tp2(
     
     :param entry_price: 진입 단가
     :param sl_price: 손절 단가
-    :param candles_15m: 15분봉 캔들 데이터 (유동성 풀 탐색에 사용)
+    :param candles_poi: POI 타임프레임(예: 5분봉) 캔들 데이터
     :param bearish_fvg_zones: 반대 방향(저항) FVG 구역 목록
     :param fallback_rr: 3순위 고정 RR 배율
     :return: 선택된 2차 익절 가격
@@ -139,7 +139,7 @@ def calc_tp2(
     risk_size = abs(entry_price - sl_price)
 
     # ── 1순위: 유동성 풀 (이전 고점) ──
-    nearest_high, _ = find_nearest_liquidity(entry_price, candles_15m)
+    nearest_high, _ = find_nearest_liquidity(entry_price, candles_poi)
     if nearest_high and nearest_high > entry_price:
         # 유동성 풀이 TP1보다 충분히 높은 경우에만 채택 (RR 1.2 이상)
         if nearest_high >= entry_price + risk_size * 1.2:

@@ -39,11 +39,11 @@ TP1_CLOSE_RATIO: float = 0.5
 # [차트 분석 파라미터]
 # ─────────────────────────────────────────────────
 
-# POI(관심 구역) 탐지에 사용할 15분봉 캔들 개수
-POI_CANDLE_COUNT_15M: int = 50
+# POI(관심 구역) 탐지에 사용할 캔들 개수 (현재 5분봉 기준)
+POI_CANDLE_COUNT: int = 50
 
-# 5분봉 진입 확정 신호 분석에 사용할 캔들 개수
-ENTRY_CANDLE_COUNT_5M: int = 20
+# 진입 확정 신호 분석에 사용할 캔들 개수 (현재 1분봉 기준)
+ENTRY_CANDLE_COUNT: int = 20
 
 # FVG 탐지: ATR 기반 동적 최소 갭 크기
 # ATR(평균 실제 범위)을 기준으로 갭 크기의 유효성을 판단합니다.
@@ -73,8 +73,8 @@ OB_DOJI_WICK_RATIO: float = 2.0
 # [타이밍 파라미터]
 # ─────────────────────────────────────────────────
 
-# 2.5단계 SL/TP 재계산 주기 (초) - 5분봉 마감에 맞춰 재계산
-STANDBY_RECALC_INTERVAL_SEC: int = 300  # 5분
+# 2.5단계 SL/TP 재계산 주기 (초) - 진입 타임프레임(1분봉) 마감에 맞춰 재계산
+STANDBY_RECALC_INTERVAL_SEC: int = 60  # 1분
 
 # 킬 스위치 감시 주기 (초)
 KILL_SWITCH_CHECK_INTERVAL_SEC: int = 60  # 1분

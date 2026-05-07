@@ -19,6 +19,9 @@ from my_trading_bot.core.api_handler import KISApiHandler
 from my_trading_bot.core.scanner import RankScanner
 from my_trading_bot.strategies.v1_smc.logic import V1SmcBot
 from my_trading_bot.utils.market_schedule import wait_for_market_open, is_market_open
+from my_trading_bot.utils.notion_logger import NotionLogger
+from my_trading_bot.utils.discord_logger import DiscordLogger
+from my_trading_bot.core.alpaca_handler import AlpacaHandler
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +37,24 @@ class SymbolManager:
         self.bots: Dict[str, V1SmcBot] = {}
         self.bot_tasks: Dict[str, List[asyncio.Task]] = {}
         
+        # Notion 로거 설정
+        notion_token = os.getenv("NOTION_TOKEN", "")
+        notion_page_id = os.getenv("NOTION_PAGE_ID", "357acb9f-6166-81f7-b5f1-e6c15b36bcd0")
+        self.notion = NotionLogger(notion_token, notion_page_id)
+        
+        # 디스코드 로거 설정
+        discord_webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
+        self.discord = DiscordLogger(discord_webhook)
+
+        # Alpaca 핸들러 설정
+        alpaca_key = os.getenv("ALPACA_API_KEY", "")
+        alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+        self.alpaca = AlpacaHandler(alpaca_key, alpaca_secret)
+        
         # 웹소켓 추가 구독을 위한 큐
         self.ws_queue = asyncio.Queue()
         self._running = False
+        self._consecutive_errors = 0
 
     async def _ws_callback(self, raw_data: str):
         """중앙 웹소켓 콜백: 데이터를 각 봇으로 배분합니다."""
@@ -76,8 +94,26 @@ class SymbolManager:
             await wait_for_market_open()
             
             logger.info("=== 장 시작: 다중 종목 관리 루프 가동 ===")
-            self.api.issue_access_token()
+            # KIS Access Token 발급 (1분 제한 대응)
+            while True:
+                res = self.api.issue_access_token()
+                if self.api.access_token:
+                    logger.info("[Manager] 토큰 발급 및 동기화 완료.")
+                    break
+                
+                # 에러 메시지 확인 (1분 제한 등)
+                error_msg = str(res.get("error", ""))
+                if "EGW00133" in error_msg or res.get("status_code") == 403:
+                    logger.warning("[Manager] 토큰 발급 제한(1분 1회) 감지. 65초 후 재시도합니다...")
+                    await asyncio.sleep(65)
+                else:
+                    logger.error(f"[Manager] 토큰 발급 실패: {error_msg}. 10초 후 재시도...")
+                    await asyncio.sleep(10)
+            
             self.api.connect_ws()
+            
+            # Notion 초기화 (DB 연결 등)
+            await self.notion.initialize()
             
             # 초기 구독 리스트 (체결통보)
             initial_reqs = [self.api.get_ccnl_notice_req(self.hts_id)]
@@ -86,6 +122,9 @@ class SymbolManager:
             ws_task = asyncio.create_task(
                 self.api.connect_and_listen_ws(initial_reqs, self._ws_callback, self.ws_queue)
             )
+            
+            # 상태 요약 출력 태스크 시작
+            summary_task = asyncio.create_task(self._summary_loop())
             
             try:
                 while is_market_open():
@@ -103,8 +142,13 @@ class SymbolManager:
                                 excd=excd,
                                 hts_id=self.hts_id,
                                 acnt_no=self.acnt_no,
-                                acnt_prdt_cd=self.acnt_prdt
+                                acnt_prdt_cd=self.acnt_prdt,
+                                alpaca=self.alpaca
                             )
+                            # 콜백 설정
+                            bot.on_state_change = self._on_bot_state_change
+                            bot.on_trade = self._on_bot_trade
+                            
                             await bot.setup()
                             tasks = await bot.start_tasks()
                             
@@ -131,15 +175,74 @@ class SymbolManager:
                         # 구독 해제는 KIS 정책상 필수는 아니나 필요시 추가 가능
                     
                     await asyncio.sleep(600) # 10분마다 재스캔
+                    self._consecutive_errors = 0 # 정상 루프 완료 시 에러 카운트 초기화
             
             except Exception as e:
-                logger.error(f"[Manager] 루프 중 오류: {e}", exc_info=True)
+                self._consecutive_errors += 1
+                # 지수 백오프: 1분, 2분, 4분, 8분... (최대 10분)
+                wait_min = min(2**(self._consecutive_errors - 1), 10)
+                logger.error(f"[Manager] 루프 중 오류 (연속 {self._consecutive_errors}회): {e}", exc_info=True)
+                logger.info(f"[Manager] {wait_min}분 후 루프를 재시작합니다.")
+                await asyncio.sleep(wait_min * 60)
             finally:
                 ws_task.cancel()
+                summary_task.cancel()
                 for tasks in self.bot_tasks.values():
                     for t in tasks:
                         t.cancel()
                 logger.info("=== 장 종료 또는 중단: 관리 루프 정지 ===")
+
+    async def _on_bot_state_change(self, symbol: str, state: str):
+        """봇 상태 변경 시 호출되는 콜백"""
+        logger.info(f"[Callback] {symbol} 상태 변경: {state}")
+        # Notion 실시간 상태 업데이트
+        bot = self.bots.get(symbol)
+        pos_qty = bot._pos.remaining_qty if bot else 0
+        entry_price = bot._pos.entry_price if bot else 0.0
+        await self.notion.update_symbol_status(symbol, state, pos_qty, entry_price)
+        
+        # 디스코드 상태 알림 (주요 상태 변화 시)
+        if state in ["STANDBY", "IN_POSITION", "COOLDOWN", "SHUTDOWN"]:
+            await self.discord.send_status_alert(
+                f"{symbol} 상태 변경", 
+                f"현재 상태: **{state}**"
+            )
+
+    async def _on_bot_trade(self, symbol: str, trade_type: str, details: dict):
+        """봇 거래 발생 시 호출되는 콜백"""
+        logger.info(f"[Callback] {symbol} 거래 발생: {trade_type} | {details}")
+        # Notion 거래 로그 추가 및 상태 갱신
+        await self.notion.add_trade_log(symbol, trade_type, details)
+        
+        # 디스코드 알림
+        await self.discord.send_trade_alert(symbol, trade_type, details)
+        
+        bot = self.bots.get(symbol)
+        if bot:
+            await self.notion.update_symbol_status(
+                symbol, bot.get_state(), bot._pos.remaining_qty, bot._pos.entry_price
+            )
+
+    async def _summary_loop(self):
+        """주기적으로 봇들의 상태를 요약하여 출력합니다."""
+        while self._running:
+            await asyncio.sleep(600) # 10분마다 출력
+            if not self.bots:
+                logger.info("[Manager Status] 현재 감시 중인 종목이 없습니다.")
+                continue
+            
+            logger.info("=" * 50)
+            logger.info(f"[Manager Status] 현재 관리 중인 종목: {len(self.bots)}개")
+            for sym, bot in self.bots.items():
+                state = bot.get_state()
+                pos_qty = bot._pos.remaining_qty
+                entry_price = bot._pos.entry_price
+                pos_status = f"포지션: {pos_qty}주" if pos_qty > 0 else "IDLE"
+                logger.info(f" - {sym:8} | 상태: {state:12} | {pos_status}")
+                
+                # Notion 대시보드 강제 갱신
+                await self.notion.update_symbol_status(sym, state, pos_qty, entry_price)
+            logger.info("=" * 50)
 
     async def shutdown(self):
         self._running = False

@@ -1,6 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-한국투자증권(KIS) API 인증 관련 모듈입니다.
+한국투자증권(KIS) API 인증 핸들러
+
+이 모듈은 자동매매 시스템이 한국투자증권 서버와 안전하게 통신할 수 있도록 '출입증'을 발급받는 역할을 합니다.
+
+[주요 기능 설명]
+1. OAuth 접근토큰 발급 (issue_access_token):
+   - 주식 주문, 잔고 조회 등 모든 일반 API 호출에 필요한 임시 비밀번호(Token)를 가져옵니다.
+   - 유효기간은 24시간이며, 시스템 시작 시 자동으로 갱신됩니다.
+
+2. 웹소켓 접속키 발급 (issue_ws_token):
+   - 실시간 주가 데이터나 내 계좌의 체결 소식을 실시간으로 듣기 위한 전용 열쇠(Approval Key)를 가져옵니다.
+
+3. 에러 핸들링:
+   - 인증 실패 시 단순한 빈 값을 반환하는 대신, 상세한 에러 코드와 메시지를 반환하여
+     매니저가 1분 제한(EGW00133) 등에 적절히 대응(대기 후 재시도)할 수 있도록 설계되었습니다.
 """
 import json
 import logging
@@ -48,11 +62,11 @@ class KISAuthHandler(KISBaseClient):
                 return response.json()
             else:
                 logger.error(f"API 호출 실패 (접근토큰): {response.status_code} - {response.text}")
-                return {}
+                return {"error": response.text, "status_code": response.status_code}
                 
         except Exception as e:
             logger.error(f"요청 중 예외 발생 (접근토큰): {str(e)}")
-            return {}
+            return {"error": str(e)}
 
     def issue_ws_token(self) -> Dict[str, Any]:
         """
@@ -85,9 +99,10 @@ class KISAuthHandler(KISBaseClient):
                 logger.info("WebSocket 접속키 발급 성공")
                 return response.json()
             else:
-                logger.error(f"API 호출 실패 (웹소켓 접속키): {response.status_code} - {response.text}")
-                return {}
+                error_msg = f"API 호출 실패 (웹소켓 접속키): {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                return {"error": response.text, "status_code": response.status_code}
                 
         except Exception as e:
             logger.error(f"요청 중 예외 발생 (웹소켓 접속키): {str(e)}")
-            return {}
+            return {"error": str(e)}

@@ -31,11 +31,11 @@ class RankScanner:
     def _get_ranked_list(self, res: dict) -> list:
         """
         KIS 랭킹 API 응답에서 종목 목록을 안전하게 추출합니다.
-        KIS API는 주로 output1에 리스트를, output에 요약 딕셔너리를 반환합니다.
+        KIS API는 주로 output2(목록), output1(메타데이터), output(기타) 형식으로 반환됩니다.
         결과가 list가 아닐 경우 빈 리스트를 반환합니다.
         """
-        # output1 우선 (KIS 랭킹 API 표준 필드), 없으면 output 시도
-        result = res.get("output1") or res.get("output")
+        # output2 우선 (KIS 랭킹 API 목록 필드), 없으면 output1, 그 다음 output 시도
+        result = res.get("output2") or res.get("output1") or res.get("output")
         if isinstance(result, list):
             return result
         # dict나 None이 반환된 경우 빈 리스트 반환
