@@ -54,16 +54,16 @@ ATR_PERIOD: int = 14
 
 # 갭 크기가 ATR × 이 배수 이상이어야 유효한 FVG로 인정
 # 예: 0.5 → 갭 ≥ ATR × 0.5 (ATR의 절반 이상)
-FVG_ATR_MULTIPLIER: float = 0.3
+FVG_ATR_MULTIPLIER: float = 0.15
 
 # ATR을 계산할 수 없을 때(캔들 부족 등) 사용하는 고정 비율 fallback
 # 현재가 대비 비율 (0.1% = 0.001)
-FVG_MIN_SIZE_RATIO: float = 0.001  # ATR 미사용 시 fallback 기준
+FVG_MIN_SIZE_RATIO: float = 0.0005  # ATR 미사용 시 fallback 기준
 
 # OB 도지캔들 인정 기준
 # 몸통(|close-open|)이 전체 캔들 범위(high-low) 대비 이 비율 이하이면 도지로 간주
 # 예: 0.3 → 몸통이 전체 범위의 30% 이하면 도지 캔들
-OB_DOJI_BODY_RATIO: float = 0.3
+OB_DOJI_BODY_RATIO: float = 0.4
 
 # 꼬리(위 또는 아래) 길이가 몸통 대비 이 배수 이상이어야 '꼬리가 긴 도지'로 인정
 # 예: 2.0 → 꼬리 길이 ≥ 몸통 길이 × 2배

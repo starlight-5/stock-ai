@@ -429,19 +429,10 @@ class V1SmcBot(BaseStrategy):
         # 롱 전략이므로 Bullish(지지) 구역만 탐지
         all_bullish_entry = [z for z in (fvg + ob) if z["type"] == "bullish"]
         
-        # [중첩 필터링] POI와 겹치는(Overlap) 진입 POI만 유효한 것으로 인정
-        if self._active_poi:
-            self._poi_zones_entry = [
-                z for z in all_bullish_entry 
-                if is_overlapping(self._active_poi, z)
-            ]
-            logger.info(
-                f"[2.5단계] 중첩 필터링 완료: {len(all_bullish_entry)}개 중 "
-                f"{len(self._poi_zones_entry)}개 유효 (상위 POI와 중첩)"
-            )
-        else:
-            self._poi_zones_entry = all_bullish_entry
-            logger.info(f"[2.5단계] 1분봉 POI {len(self._poi_zones_entry)}개 갱신 완료 (상위 POI 정보 없음)")
+        # [중첩 필터링 완화] 상위 POI 터치 후에는 1분봉에서 발생하는 모든 지지 POI를 인정합니다.
+        # 기존에는 상위 POI와 물리적으로 겹쳐야만 했으나, 실전 변동성을 고려하여 범위를 넓혔습니다.
+        self._poi_zones_entry = all_bullish_entry
+        logger.info(f"[2.5단계] 1분봉 POI {len(self._poi_zones_entry)}개 갱신 완료 (조건 완화 적용)")
 
         for zone in self._poi_zones_entry:
             logger.info(f"  - Entry POI: [{zone['type_label']}] {zone['low']:.4f} ~ {zone['high']:.4f}")
