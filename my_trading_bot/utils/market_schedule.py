@@ -29,10 +29,15 @@ logger = logging.getLogger(__name__)
 
 # 미국 동부 시간대 (EST/EDT 자동 처리)
 ET = pytz.timezone("America/New_York")
+KST = pytz.timezone("Asia/Seoul")
 
-# 정규장 시작/종료 시각 (ET 기준)
-MARKET_OPEN  = time(9, 30, 0)   # 09:30 ET
-MARKET_CLOSE = time(16, 0, 0)   # 16:00 ET
+# 정규장 시작/종료 시각 (미국 ET 기준)
+MARKET_OPEN_US  = time(9, 30, 0)   # 09:30 ET
+MARKET_CLOSE_US = time(16, 0, 0)   # 16:00 ET
+
+# 정규장 시작/종료 시각 (한국 KST 기준)
+MARKET_OPEN_KR  = time(9, 0, 0)    # 09:00 KST
+MARKET_CLOSE_KR = time(15, 30, 0)  # 15:30 KST
 
 
 def now_et() -> datetime:
@@ -40,36 +45,48 @@ def now_et() -> datetime:
     return datetime.now(ET)
 
 
-def is_market_open() -> bool:
+def is_market_open(market: str = "US") -> bool:
     """
-    현재 미국 정규장이 열려 있는지 확인합니다.
-    
+    현재 정규장이 열려 있는지 확인합니다.
+    :param market: "US" (미국) 또는 "KR" (한국)
     :return: True이면 현재 정규장 시간, False이면 장 외 시간
     """
-    now = now_et()
+    if market.upper() == "US":
+        now = datetime.now(ET)
+        m_open, m_close = MARKET_OPEN_US, MARKET_CLOSE_US
+    else:
+        now = datetime.now(KST)
+        m_open, m_close = MARKET_OPEN_KR, MARKET_CLOSE_KR
     
     # 주말(토=5, 일=6) 체크
     if now.weekday() >= 5:
         return False
     
     current_time = now.time()
-    return MARKET_OPEN <= current_time < MARKET_CLOSE
+    return m_open <= current_time < m_close
 
 
-def get_seconds_until_open() -> float:
+def get_seconds_until_open(market: str = "US") -> float:
     """
     다음 정규장 오픈까지 남은 시간(초)을 반환합니다.
-    
+    :param market: "US" 또는 "KR"
     :return: 장 오픈까지 남은 초 수 (이미 열려 있으면 0)
     """
-    if is_market_open():
+    if is_market_open(market):
         return 0.0
 
-    now = now_et()
+    if market.upper() == "US":
+        tz = ET
+        m_open = MARKET_OPEN_US
+    else:
+        tz = KST
+        m_open = MARKET_OPEN_KR
+
+    now = datetime.now(tz)
     today = now.date()
 
     # 오늘 장 오픈 시각 계산
-    open_today = ET.localize(datetime.combine(today, MARKET_OPEN))
+    open_today = tz.localize(datetime.combine(today, m_open))
 
     # 현재가 장 오픈 전이고 평일이면 → 오늘 오픈까지 대기
     if now < open_today and now.weekday() < 5:
@@ -91,34 +108,35 @@ def format_wait_time(seconds: float) -> str:
     return f"{h}시간 {m}분 {s}초"
 
 
-async def wait_for_market_open(check_interval_sec: int = 60) -> None:
+async def wait_for_market_open(check_interval_sec: int = 60, market: str = "US") -> None:
     """
-    미국 정규장이 열릴 때까지 비동기로 대기합니다.
-    1분마다 남은 시간을 로그에 출력합니다.
-    
+    정규장이 열릴 때까지 비동기로 대기합니다.
     :param check_interval_sec: 상태 로그 출력 주기 (초, 기본 60초)
+    :param market: "US" 또는 "KR"
     """
-    if is_market_open():
-        logger.info("미국 정규장이 이미 열려 있습니다. 즉시 거래를 시작합니다.")
+    market_name = "미국" if market.upper() == "US" else "한국"
+    if is_market_open(market):
+        logger.info(f"{market_name} 정규장이 이미 열려 있습니다. 즉시 거래를 시작합니다.")
         return
 
-    wait_sec = get_seconds_until_open()
-    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-    open_et = now_et() + timedelta(seconds=wait_sec)
+    wait_sec = get_seconds_until_open(market)
+    tz = ET if market.upper() == "US" else KST
+    now_tz = datetime.now(tz)
+    open_time = now_tz + timedelta(seconds=wait_sec)
 
     logger.info(
-        f"미국 정규장 대기 중...\n"
-        f"  현재 한국시간: {now_kst.strftime('%Y-%m-%d %H:%M:%S KST')}\n"
-        f"  장 오픈 예정 (ET): {open_et.strftime('%Y-%m-%d %H:%M:%S ET')}\n"
+        f"{market_name} 정규장 대기 중...\n"
+        f"  현재 시간: {now_tz.strftime('%Y-%m-%d %H:%M:%S')} {tz.zone}\n"
+        f"  장 오픈 예정: {open_time.strftime('%Y-%m-%d %H:%M:%S')} {tz.zone}\n"
         f"  대기 시간: {format_wait_time(wait_sec)}"
     )
 
     while True:
-        if is_market_open():
-            logger.info("미국 정규장 오픈! 거래를 시작합니다.")
+        if is_market_open(market):
+            logger.info(f"{market_name} 정규장 오픈! 거래를 시작합니다.")
             return
 
-        wait_sec = get_seconds_until_open()
+        wait_sec = get_seconds_until_open(market)
         
         # 남은 시간이 check_interval보다 짧으면 딱 맞게 대기
         sleep_sec = min(check_interval_sec, wait_sec)
@@ -126,21 +144,29 @@ async def wait_for_market_open(check_interval_sec: int = 60) -> None:
             await asyncio.sleep(1)
             continue
 
-        logger.info(f"  장 오픈까지 남은 시간: {format_wait_time(wait_sec)}")
+        logger.info(f"  {market_name} 장 오픈까지 남은 시간: {format_wait_time(wait_sec)}")
         await asyncio.sleep(sleep_sec)
 
 
-def is_market_closing_soon(minutes: int = 30) -> bool:
+def is_market_closing_soon(minutes: int = 30, market: str = "US") -> bool:
     """
     정규장 마감까지 지정한 시간(분) 이하로 남았는지 확인합니다.
-    신규 진입을 막을 때 활용합니다.
-    
     :param minutes: 기준 분 수 (기본 30분)
+    :param market: "US" 또는 "KR"
     :return: 마감 N분 이내이면 True
     """
-    now = now_et()
-    if not is_market_open():
+    if market.upper() == "US":
+        now = datetime.now(ET)
+        m_close = MARKET_CLOSE_US
+    else:
+        now = datetime.now(KST)
+        m_close = MARKET_CLOSE_KR
+        
+    if not is_market_open(market):
         return False
-    close_today = ET.localize(datetime.combine(now.date(), MARKET_CLOSE))
+    
+    # 해당 시장 시간대 유지하며 오늘 마감 시각 계산
+    tz = ET if market.upper() == "US" else KST
+    close_today = tz.localize(datetime.combine(now.date(), m_close))
     remaining = (close_today - now).total_seconds()
     return remaining <= minutes * 60

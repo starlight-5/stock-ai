@@ -1,8 +1,0 @@
-price_fluct: URL=/uapi/overseas-stock/v1/ranking/price-fluct, TR_ID=HHDFS76260000
-volume_surge: URL=/uapi/overseas-stock/v1/ranking/volume-surge, TR_ID=HHDFS76270000
-volume_power: URL=/uapi/overseas-stock/v1/ranking/volume-power, TR_ID=HHDFS76280000
-updown_rate: URL=/uapi/overseas-stock/v1/ranking/updown-rate, TR_ID=HHDFS76290000
-trade_vol: URL=/uapi/overseas-stock/v1/ranking/trade-vol, TR_ID=HHDFS76310010
-trade_pbmn: URL=/uapi/overseas-stock/v1/ranking/trade-pbmn, TR_ID=HHDFS76320010
-trade_growth: URL=/uapi/overseas-stock/v1/ranking/trade-growth, TR_ID=HHDFS76330000
-trade_turnover: URL=/uapi/overseas-stock/v1/ranking/trade-turnover, TR_ID=HHDFS76340000

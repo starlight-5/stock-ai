@@ -15,6 +15,8 @@ class KISWebSocketHandler:
     1. 해외주식 실시간호가 (미국) - HDFSASP0
     2. 해외주식 실시간지연체결가 - HDFSCNT0
     3. 해외주식 실시간체결통보 - H0GSCNI0
+    4. 국내주식 실시간체결가 - H0STCNT0
+    5. 국내주식 실시간체결통보 - H0STCNI0
     """
     def __init__(self, approval_key: str = "", env_dv: str = "real"):
         self.approval_key = approval_key
@@ -63,6 +65,14 @@ class KISWebSocketHandler:
         :param hts_id: 고객 HTS ID
         """
         return self._build_request("H0GSCNI0", hts_id, tr_type)
+
+    def get_domestic_price_req(self, symb: str, tr_type: str = "1") -> str:
+        """4. 국내주식 실시간체결가 구독 페이로드 반환"""
+        return self._build_request("H0STCNT0", symb, tr_type)
+
+    def get_domestic_ccnl_notice_req(self, hts_id: str, tr_type: str = "1") -> str:
+        """5. 국내주식 실시간체결통보 구독 페이로드 반환"""
+        return self._build_request("H0STCNI0", hts_id, tr_type)
 
     async def connect_and_listen(self, requests_payloads: List[str], callback: Callable[[str], Awaitable[None]], 
                                  new_req_queue: Optional[asyncio.Queue] = None):

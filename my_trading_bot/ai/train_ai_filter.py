@@ -19,7 +19,9 @@ import os
 
 def train():
     # 1. 데이터 로드
-    csv_path = "trading_data_for_ai.csv"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(base_dir, "trading_data_for_ai.csv")
+    
     if not os.path.exists(csv_path):
         print(f"오류: {csv_path} 파일이 없습니다. 백테스트를 먼저 실행하여 데이터를 수집하세요.")
         return
@@ -75,7 +77,7 @@ def train():
         print(f"{i+1}. {features[indices[i]]:<15}: {importances[indices[i]]:.4f}")
 
     # 6. 모델 저장
-    model_path = "smc_ai_filter.json"
+    model_path = os.path.join(base_dir, "smc_ai_filter.json")
     model.save_model(model_path)
     print("\n" + "="*50)
     print(f"성공: AI 필터 모델이 {model_path}에 저장되었습니다.")

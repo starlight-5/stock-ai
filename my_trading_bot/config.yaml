@@ -7,8 +7,9 @@ strategy: "v1_smc"
 # 거래 종목 설정
 # ─────────────────────────────────────────────────
 trading:
-  excd: "NAS"          # 거래소 코드 (NAS=나스닥, NYS=뉴욕, AMS=아먱스)
-  symbol: "AAPL"       # 거래 종목 코드
+  market_type: "KR"      # 시장 타입 (KR=국내, US=해외)
+  excd: "KR"             # 거래소 코드 (KR=국내, NAS=나스닥, NYS=뉴욕, AMS=아먱스)
+  symbol: "005930"       # 기본 거래 종목 (삼성전자)
   # KEY, SECRET, HTS_ID, 계좌번호 등 인증정보는
   # 모두 .env 파일에서 관리합니다. (KIS_APP_KEY, KIS_HTS_ID 등)
 

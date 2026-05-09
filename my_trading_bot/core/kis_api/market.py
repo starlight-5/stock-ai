@@ -234,3 +234,38 @@ class KISMarketHandler(KISBaseClient):
             "GB1": gb1
         }
         return self._call_market_api(path, tr_id, params)
+    # 13. [국내주식] 주식현재가 시세
+    def get_domestic_price(self, iscd: str, mrkt_div_code: str = "J") -> Dict[str, Any]:
+        """
+        국내주식 현재가 시세 조회
+        :param iscd: 종목코드 (6자리)
+        :param mrkt_div_code: 시장분류코드 (J: 주식, NX: NXT, UN: 통합)
+        """
+        path = "/uapi/domestic-stock/v1/quotations/inquire-price"
+        tr_id = "FHKST01010100"
+        params = {
+            "FID_COND_MRKT_DIV_CODE": mrkt_div_code,
+            "FID_INPUT_ISCD": iscd
+        }
+        return self._call_market_api(path, tr_id, params)
+
+    # 14. [국내주식] 주식일별분봉조회
+    def get_domestic_minute_chart(self, iscd: str, hour: str, date: str, mrkt_div_code: str = "J") -> Dict[str, Any]:
+        """
+        국내주식 일별 분봉 조회
+        :param iscd: 종목코드 (6자리)
+        :param hour: 입력 시간1 (HHMMSS)
+        :param date: 입력 날짜1 (YYYYMMDD)
+        :param mrkt_div_code: 시장분류코드 (J: 주식)
+        """
+        path = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
+        tr_id = "FHKST03010230"
+        params = {
+            "FID_COND_MRKT_DIV_CODE": mrkt_div_code,
+            "FID_INPUT_ISCD": iscd,
+            "FID_INPUT_HOUR_1": hour,
+            "FID_INPUT_DATE_1": date,
+            "FID_PW_DATA_INCU_YN": "N",
+            "FID_FAKE_TICK_INCU_YN": "N"
+        }
+        return self._call_market_api(path, tr_id, params)

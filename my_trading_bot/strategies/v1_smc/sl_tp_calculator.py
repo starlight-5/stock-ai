@@ -10,6 +10,7 @@
 
 import logging
 import math
+import numpy as np
 from typing import Optional, List, Dict, Any
 
 from .params import (
@@ -39,15 +40,32 @@ def calc_sl_price(candles_entry: List[Dict[str, Any]], direction: str = "long") 
 
     # 가장 최근 신호 캔들을 기준으로 사용 (리스트의 마지막 캔들)
     signal_candle = candles_entry[-1]
+    
+    # ATR 계산 (최근 5봉 기준 변동성 확보)
+    try:
+        highs = np.array([float(c.get("high", c.get("hipr", 0))) for c in candles_entry[-14:]])
+        lows = np.array([float(c.get("low", c.get("lopr", 0))) for c in candles_entry[-14:]])
+        closes = np.array([float(c.get("close", c.get("stck_prpr", 0))) for c in candles_entry[-14:]])
+        
+        tr1 = highs - lows
+        tr2 = np.abs(highs - np.roll(closes, 1))
+        tr3 = np.abs(lows - np.roll(closes, 1))
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)[1:] # 첫 항 제외
+        atr = np.mean(tr) if len(tr) > 0 else 0
+    except:
+        atr = 0
+
     try:
         if direction == "long":
-            # 롱 진입: 최근 신호 캔들의 저가가 손절 라인
-            sl = float(signal_candle.get("low", signal_candle.get("lopr", 0)))
+            # 롱 진입: 최근 저가 - (1.5 * ATR)
+            low_val = float(signal_candle.get("low", signal_candle.get("lopr", 0)))
+            sl = low_val - (1.5 * atr) if atr > 0 else low_val * 0.995 # ATR 없으면 최소 0.5%
         else:
-            # 숏 진입: 최근 신호 캔들의 고가가 손절 라인
-            sl = float(signal_candle.get("high", signal_candle.get("hipr", 0)))
+            # 숏 진입: 최근 고가 + (1.5 * ATR)
+            high_val = float(signal_candle.get("high", signal_candle.get("hipr", 0)))
+            sl = high_val + (1.5 * atr) if atr > 0 else high_val * 1.005
         
-        logger.info(f"SL 계산 완료: {sl:.4f} (방향={direction})")
+        logger.info(f"SL 계산 완료: {sl:.4f} (ATR={atr:.4f}, 방향={direction})")
         return sl
     except (ValueError, TypeError) as e:
         logger.error(f"SL 계산 중 오류 발생: {e}")

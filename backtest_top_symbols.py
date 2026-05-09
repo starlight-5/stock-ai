@@ -22,7 +22,7 @@ from my_trading_bot.strategies.v1_smc.sl_tp_calculator import (
 )
 from my_trading_bot.strategies.v1_smc.params import (
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT, ATR_PERIOD,
-    TP1_RR_RATIO, TRADE_RISK_RATIO
+    TP1_RR_RATIO, TRADE_RISK_RATIO, COMMISSION_RATE
 )
 
 try:
@@ -161,6 +161,12 @@ class SMCBacktester:
         
         sl = calc_sl_price(candles_1m, direction="long")
         if not sl or sl >= price:
+            sl = price * 0.995 # 최소 0.5% 여유
+        
+        # [최소 리스크 거리 필터]
+        # 수수료(0.5%)를 압도하기 위해 리스크 거리(R)를 0.8% 이상으로 설정
+        risk_pct = (price - sl) / price
+        if risk_pct < 0.008:
             return
 
         tp1 = calc_tp1(price, sl)
@@ -196,7 +202,7 @@ class SMCBacktester:
             input_data = pd.DataFrame([[features[c] for c in feature_cols]], columns=feature_cols)
             
             prob = self.ai_model.predict_proba(input_data)[0][1]
-            if prob < 0.45: # 성공 확률 45% 미만은 필터링 (보수적 접근)
+            if prob < 0.60: # 성공 확률 60% 미만은 필터링 (보수적 접근)
                 self.filtered_count += 1
                 return
 
@@ -221,8 +227,10 @@ class SMCBacktester:
         
         # 1. 손절 체크
         if low <= pos["sl"]:
-            pnl = (pos["sl"] - pos["entry_price"]) * pos["qty"]
-            # 만약 TP1이 이미 히트되었다면 절반만 손실 (실제로는 본절 이동 로직 등이 있을 수 있음)
+            # 왕복 수수료 반영 (진입 시 + 청산 시)
+            fee = pos["entry_price"] * pos["qty"] * COMMISSION_RATE
+            pnl = (pos["sl"] - pos["entry_price"]) * pos["qty"] - fee
+            
             self.capital += pnl
             self.trades.append({"symbol": self.symbol, "type": "SL", "pnl": pnl, "time": curr_time})
             self._record_data(label=0) # [AI 라벨링] 실패(0)
@@ -230,20 +238,20 @@ class SMCBacktester:
             self._reset_state()
             return
 
-        # 2. 1차 익절 체크
-        if not pos["tp1_hit"] and high >= pos["tp1"]:
-            # 절반 매도
-            pnl = (pos["tp1"] - pos["entry_price"]) * (pos["qty"] // 2)
-            self.capital += pnl
-            pos["tp1_hit"] = True
-            # SL을 진입가로 이동 (Breakeven)
-            pos["sl"] = pos["entry_price"]
-            logger.info(f"  [TP1 HIT] {curr_time} | PnL: {pnl:.2f}, Moving SL to Entry")
+        # [트레일링 수익 확보] 2.0R 도달 시 1.0R 수익 지점으로 SL 이동
+        r_dist = pos["entry_price"] - pos["initial_sl"]
+        if not pos["tp1_hit"] and high >= (pos["entry_price"] + r_dist * 2.0):
+            pos["sl"] = pos["entry_price"] + r_dist * 1.0 # 1.0R 수익 확보
+            pos["tp1_hit"] = True # 플래그 재사용
+            logger.info(f"  [TRAILING] Locked 1.0R Profit at {pos['sl']:.2f}")
+            return
 
         # 3. 2차 익절 체크
         if high >= pos["tp2"]:
-            rem_qty = pos["qty"] - (pos["qty"] // 2 if pos["tp1_hit"] else 0)
-            pnl = (pos["tp2"] - pos["entry_price"]) * rem_qty
+            rem_qty = pos["qty"]
+            fee = pos["entry_price"] * rem_qty * COMMISSION_RATE
+            pnl = (pos["tp2"] - pos["entry_price"]) * rem_qty - fee
+            
             self.capital += pnl
             self.trades.append({"symbol": self.symbol, "type": "TP2", "pnl": pnl, "time": curr_time})
             self._record_data(label=1) # [AI 라벨링] 성공(1)
@@ -265,19 +273,21 @@ class SMCBacktester:
         self.poi_zones_entry = []
 
     def _print_summary(self):
-        profit = self.capital - self.initial_capital
-        win_count = len([t for t in self.trades if t["pnl"] > 0])
-        total_trades = len(self.trades)
-        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = self.capital - self.initial_capital
+        win_trades = [t for t in self.trades if t['pnl'] > 0]
+        sl_count = len([t for t in self.trades if t['type'] == "SL"])
+        tp1_count = len([t for t in self.trades if t['type'] == "TP1"])
+        tp2_count = len([t for t in self.trades if t['type'] == "TP2"])
         
-        print(f"\n--- Backtest Summary: {self.symbol} ---")
-        print(f"Total Trades: {total_trades}")
-        print(f"Win Rate: {win_rate:.2f}%")
-        print(f"Total PnL: ${profit:.2f}")
-        print(f"Final Capital: ${self.capital:.2f}")
-        if self.filtered_count > 0:
-            print(f"AI Filtered: {self.filtered_count} trades")
-        print("------------------------------------\n")
+        total_finished = sl_count + tp2_count
+        win_rate = (tp2_count / total_finished * 100) if total_finished > 0 else 0
+        
+        print(f"\n--- [{self.symbol}] 테스트 결과 ---")
+        print(f"최종 자본: ${self.capital:.2f} (수익: ${total_pnl:.2f})")
+        print(f"매매 횟수: {len(self.trades)} (SL: {sl_count}, TP1: {tp1_count}, TP2: {tp2_count})")
+        print(f"승률(TP2 기준): {win_rate:.2f}%")
+        print(f"AI 필터링 횟수: {self.filtered_count}")
+        print("------------------------------")
 
 async def main():
     # 1. API 초기화
@@ -291,7 +301,9 @@ async def main():
     
     # AI 모델 로드
     ai_model = None
-    model_path = "smc_ai_filter.json"
+    # my_trading_bot/ai/ 폴더 내부의 모델 참조
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(base_dir, "my_trading_bot", "ai", "smc_ai_filter.json")
     if os.path.exists(model_path) and AI_AVAILABLE:
         try:
             ai_model = XGBClassifier()
@@ -316,12 +328,12 @@ async def main():
     ]
     results = []
     
-    # 3. 종목별 데이터 로드 및 백테스트 (최근 14일치)
+    # 3. 종목별 데이터 로드 및 백테스트 (최근 28일치)
     for excd, symbol in top_symbols:
-        logger.info(f"=== {symbol} ({excd}) 데이터 수집 중 (14일) ===")
+        logger.info(f"=== {symbol} ({excd}) 데이터 수집 중 (28일) ===")
         
         all_candles = []
-        start_dt = datetime.now() - timedelta(days=14)
+        start_dt = datetime.now() - timedelta(days=28)
         
         # 10,000개씩 조회하여 수집
         for _ in range(3):
@@ -383,7 +395,8 @@ async def main():
     
     if all_data:
         df_ai = pd.DataFrame(all_data)
-        csv_path = "trading_data_for_ai.csv"
+        # my_trading_bot/ai/ 폴더 내부에 데이터 저장
+        csv_path = os.path.join(base_dir, "my_trading_bot", "ai", "trading_data_for_ai.csv")
         df_ai.to_csv(csv_path, index=False)
         print(f"\n[AI Data Collection] {len(df_ai)}개의 매매 기록이 {csv_path}에 저장되었습니다.")
 
