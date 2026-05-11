@@ -18,7 +18,12 @@ class KISAnalysisHandler(KISBaseClient):
 
     def _call_analysis_api(self, tr_id: str, url_path: str, params: Dict[str, Any], tr_cont: str = "") -> Dict[str, Any]:
         """시세 분석 공통 API 호출 헬퍼"""
-        headers = self._get_headers(tr_id)
+        # 환경 구분에 따라 TR_ID 접두사 조정 (국내 주식 API 대응)
+        actual_tr_id = tr_id
+        if self.env_dv == "demo" and tr_id.startswith("F"):
+            actual_tr_id = "V" + tr_id[1:]
+            
+        headers = self._get_headers(actual_tr_id)
         if tr_cont:
             headers["tr_cont"] = tr_cont
             

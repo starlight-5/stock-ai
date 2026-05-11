@@ -22,7 +22,8 @@ from my_trading_bot.strategies.v1_smc.sl_tp_calculator import (
 )
 from my_trading_bot.strategies.v1_smc.params import (
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT, ATR_PERIOD,
-    TP1_RR_RATIO, TRADE_RISK_RATIO, COMMISSION_RATE
+    TP1_RR_RATIO, TRADE_RISK_RATIO, COMMISSION_RATE, AI_PROB_THRESHOLD,
+    TP1_CLOSE_RATIO, KILL_ZONE_START_UTC_HOUR, KILL_ZONE_END_UTC_HOUR, KILL_ZONE_MINUTE_END
 )
 
 try:
@@ -31,8 +32,8 @@ try:
 except ImportError:
     AI_AVAILABLE = False
 
-# 로깅 설정 (결론만 보기 위해 WARNING 레벨로 설정)
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+# 로깅 설정 (진행 상황 확인을 위해 INFO 레벨로 설정)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv(find_dotenv())
@@ -43,7 +44,8 @@ class SMCBacktester:
         self.df = pd.DataFrame(candles_1m)
         self.initial_capital = initial_capital
         self.capital = initial_capital
-        self.ai_model = ai_model # 학습된 모델 추가
+        self.ai_model = ai_model 
+        self.market_type = getattr(self, 'market_type', "US") # 기본값
         
         self.trades = []
         self.state = "MONITORING" # MONITORING, STANDBY, IN_POSITION
@@ -154,19 +156,111 @@ class SMCBacktester:
             if is_overlapping(self.active_poi, z)
         ]
 
+    def _is_uptrend(self, past_df: pd.DataFrame) -> bool:
+        """
+        [신규] HTF(Higher Time Frame) 추세 필터.
+        SMC 핵심 원칙: 상위 타임프레임 추세 방향과 같은 방향으로만 진입합니다.
+        하락 추세 중 FVG 롱 진입은 절대 금지 - 이것이 가장 많은 손절 원인이었습니다.
+
+        [판단 로직 - 2가지 조건 모두 만족해야 상승 추세로 인정]
+        1. EMA50 조건: 최근 15분봉 기준
+           현재가(마지막 15분봉 종가) > EMA50 → 중기 상승 추세
+        2. 가격 구조 조건: 최근 15분봉 10개 구간에서
+           최근 5봉 고점 > 이전 5봉 고점(HH) AND 최근 5봉 저점 > 이전 5봉 저점(HL)
+           → Higher High / Higher Low 구조 확인
+
+        :param past_df: 현재 시점까지의 1분봉 DataFrame
+        :return: True면 상승 추세 (진입 허용), False면 하락/횡보 (진입 차단)
+        """
+        try:
+            # ── 15분봉 리샘플 (EMA / 구조 분석용) ──
+            df_tmp = past_df.copy()
+            df_tmp['time'] = pd.to_datetime(df_tmp['time'])
+            df_tmp = df_tmp.set_index('time')
+            df_15m = df_tmp.resample('15min').agg({
+                'open': 'first', 'high': 'max',
+                'low': 'min',   'close': 'last'
+            }).dropna()
+
+            # 최소 60개 15분봉(약 15시간)이 없으면 추세 판단 불가 → 보수적으로 차단
+            if len(df_15m) < 60:
+                return False
+
+            closes_15m = df_15m['close'].values
+
+            # ── 조건 1: EMA50 기준 현재가 위치 ──
+            # EMA50: 최근 50개 15분봉 종가의 지수이동평균
+            ema50 = pd.Series(closes_15m).ewm(span=50, adjust=False).mean().iloc[-1]
+            current_price = closes_15m[-1]
+            ema_uptrend = current_price > ema50
+
+            # ── 조건 2: Higher High / Higher Low 가격 구조 ──
+            # 최근 10개 15분봉을 전반/후반 5개로 나눠 구조 비교
+            highs_15m = df_15m['high'].values
+            lows_15m  = df_15m['low'].values
+
+            prev_high = highs_15m[-10:-5].max()   # 이전 5봉 최고점
+            curr_high = highs_15m[-5:].max()      # 최근 5봉 최고점
+            prev_low  = lows_15m[-10:-5].min()    # 이전 5봉 최저점
+            curr_low  = lows_15m[-5:].min()       # 최근 5봉 최저점
+
+            # HH(Higher High): 최근 고점이 이전 고점보다 높음
+            # HL(Higher Low):  최근 저점이 이전 저점보다 높음
+            structure_uptrend = (curr_high > prev_high) and (curr_low > prev_low)
+
+            result = ema_uptrend and structure_uptrend
+            if not result:
+                logger.debug(
+                    f"[추세 필터 차단] EMA50={ema50:.2f} vs Price={current_price:.2f} "
+                    f"| EMA_UP={ema_uptrend}, HH/HL={structure_uptrend}"
+                )
+            return result
+
+        except Exception as e:
+            logger.debug(f"[추세 필터] 계산 오류: {e}")
+            return False  # 오류 시 보수적으로 진입 차단
+
+    def _is_kill_zone(self, curr_dt: pd.Timestamp) -> bool:
+
+        """
+        [개선] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다.
+        개장 후 첫 1시간(UTC 14:30~15:30)은 유동성 헌팅이 극심하여
+        일반 FVG 진입 시 휩소 손절 위험이 매우 높습니다. 이 시간대 진입을 차단합니다.
+        :param curr_dt: 현재 캔들의 UTC 기준 시간
+        :return: True면 진입 차단 구간
+        """
+        h = curr_dt.hour
+        m = curr_dt.minute
+        # UTC 14:30 ~ 15:30 구간 차단
+        if h == KILL_ZONE_START_UTC_HOUR and m >= 30:
+            return True
+        if h == KILL_ZONE_END_UTC_HOUR and m < KILL_ZONE_MINUTE_END:
+            return True
+        return False
+
     def _execute_entry(self, price, past_df, curr_time):
+        # [개선 ①] 킬존(Kill Zone) 시간대 진입 차단
+        curr_dt = pd.to_datetime(curr_time, utc=True)
+        if self._is_kill_zone(curr_dt):
+            return
+
+        # [신규 ②] HTF 추세 필터: 상승 추세가 아니면 롱 진입 금지
+        # SMC 핵심 원칙 - 상위 타임프레임(15분봉) 추세와 같은 방향으로만 진입
+        if not self._is_uptrend(past_df):
+            return
+
         # 5분봉 리샘플링하여 TP2 계산용으로 전달
         candles_5m = self._resample_to_5m(past_df.iloc[-250:])
         candles_1m = past_df.iloc[-20:].to_dict('records')
-        
+
         sl = calc_sl_price(candles_1m, direction="long")
         if not sl or sl >= price:
-            sl = price * 0.995 # 최소 0.5% 여유
-        
-        # [최소 리스크 거리 필터]
-        # 수수료(0.5%)를 압도하기 위해 리스크 거리(R)를 0.8% 이상으로 설정
+            sl = price * 0.988  # 구조적 SL 실패 시 1.2% 기본 여유
+
+        # 리스크 거리가 너무 좁으면(0.5% 미만) 진입 포기
+        # [개선] 0.7% → 0.5% : 구조적 SL로 SL 위치가 더 넓어졌으므로 최소 기준 완화
         risk_pct = (price - sl) / price
-        if risk_pct < 0.008:
+        if risk_pct < 0.005:
             return
 
         tp1 = calc_tp1(price, sl)
@@ -202,59 +296,82 @@ class SMCBacktester:
             input_data = pd.DataFrame([[features[c] for c in feature_cols]], columns=feature_cols)
             
             prob = self.ai_model.predict_proba(input_data)[0][1]
-            if prob < 0.60: # 성공 확률 60% 미만은 필터링 (보수적 접근)
+            if prob < AI_PROB_THRESHOLD: # params.py에 설정된 임계치 사용
                 self.filtered_count += 1
                 return
 
         self.current_pos = {
             "entry_price": price,
             "sl": sl,
+            "initial_sl": sl,       # 트레일링/Breakeven 기준 SL
             "tp1": tp1,
             "tp2": tp2,
             "qty": qty,
-            "tp1_hit": False,
+            "remaining_qty": qty,   # [개선] 분할 익절 후 남은 수량 추적
+            "tp1_hit": False,        # TP1 도달 여부 (Breakeven 이동 트리거)
             "entry_time": curr_time,
-            "features": features # 피처 데이터 저장
+            "features": features
         }
         self.state = "IN_POSITION"
         logger.info(f"  [ENTRY] {curr_time} | Price: {price:.2f}, SL: {sl:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
 
     def _handle_position(self, candle):
+        """
+        [개선] 포지션 관리 로직:
+          1. 손절(SL) 체크
+          2. TP1 도달 → 50% 분할 익절 + SL을 Breakeven(진입가)으로 이동
+          3. TP2 도달 → 나머지 전량 익절
+        """
         pos = self.current_pos
         high = candle['high']
-        low = candle['low']
+        low  = candle['low']
         curr_time = candle['time']
-        
-        # 1. 손절 체크
+
+        # ── 1. 손절(SL) 체크 ──
         if low <= pos["sl"]:
-            # 왕복 수수료 반영 (진입 시 + 청산 시)
-            fee = pos["entry_price"] * pos["qty"] * COMMISSION_RATE
-            pnl = (pos["sl"] - pos["entry_price"]) * pos["qty"] - fee
-            
+            rem_qty = pos["remaining_qty"]
+            fee = pos["entry_price"] * rem_qty * COMMISSION_RATE
+            pnl = (pos["sl"] - pos["entry_price"]) * rem_qty - fee
+
             self.capital += pnl
             self.trades.append({"symbol": self.symbol, "type": "SL", "pnl": pnl, "time": curr_time})
-            self._record_data(label=0) # [AI 라벨링] 실패(0)
+            self._record_data(label=0)  # AI 라벨: 실패
             logger.info(f"  [EXIT-SL] {curr_time} | PnL: {pnl:.2f}, Balance: {self.capital:.2f}")
             self._reset_state()
             return
 
-        # [트레일링 수익 확보] 2.0R 도달 시 1.0R 수익 지점으로 SL 이동
-        r_dist = pos["entry_price"] - pos["initial_sl"]
-        if not pos["tp1_hit"] and high >= (pos["entry_price"] + r_dist * 2.0):
-            pos["sl"] = pos["entry_price"] + r_dist * 1.0 # 1.0R 수익 확보
-            pos["tp1_hit"] = True # 플래그 재사용
-            logger.info(f"  [TRAILING] Locked 1.0R Profit at {pos['sl']:.2f}")
+        # ── 2. TP1 도달 → 분할 익절 + Breakeven 이동 ──
+        if not pos["tp1_hit"] and high >= pos["tp1"]:
+            # [개선] TP1_CLOSE_RATIO(50%) 만큼 분할 익절
+            close_qty = max(1, int(pos["remaining_qty"] * TP1_CLOSE_RATIO))
+            fee = pos["entry_price"] * close_qty * COMMISSION_RATE
+            pnl_partial = (pos["tp1"] - pos["entry_price"]) * close_qty - fee
+
+            self.capital += pnl_partial
+            pos["remaining_qty"] -= close_qty
+            self.trades.append({"symbol": self.symbol, "type": "TP1", "pnl": pnl_partial, "time": curr_time})
+            logger.info(f"  [EXIT-TP1 PARTIAL] {curr_time} | Qty: {close_qty}, PnL: {pnl_partial:.2f}")
+
+            # [개선] Breakeven: 나머지 물량의 SL을 진입가로 이동 → 무위험(Risk-Free) 상태
+            pos["sl"] = pos["entry_price"]
+            pos["tp1_hit"] = True
+            logger.info(f"  [BREAKEVEN] SL 진입가({pos['entry_price']:.2f})로 이동 완료")
+
+            # 나머지 수량이 없으면 포지션 종료
+            if pos["remaining_qty"] <= 0:
+                self._record_data(label=1)
+                self._reset_state()
             return
 
-        # 3. 2차 익절 체크
+        # ── 3. TP2 도달 → 나머지 전량 익절 ──
         if high >= pos["tp2"]:
-            rem_qty = pos["qty"]
+            rem_qty = pos["remaining_qty"]
             fee = pos["entry_price"] * rem_qty * COMMISSION_RATE
             pnl = (pos["tp2"] - pos["entry_price"]) * rem_qty - fee
-            
+
             self.capital += pnl
             self.trades.append({"symbol": self.symbol, "type": "TP2", "pnl": pnl, "time": curr_time})
-            self._record_data(label=1) # [AI 라벨링] 성공(1)
+            self._record_data(label=1)  # AI 라벨: 성공
             logger.info(f"  [EXIT-TP2] {curr_time} | PnL: {pnl:.2f}, Balance: {self.capital:.2f}")
             self._reset_state()
 
@@ -315,55 +432,80 @@ async def main():
     scanner = RankScanner(api)
     alpaca = AlpacaHandler(alpaca_key, alpaca_secret)
     
-    # 2. 상위 종목 스캔 (KIS API 호출 제한 고려)
+    # 2. 상위 종목 스캔
+    market_type = os.getenv("MARKET_TYPE", "KR")
     try:
-        top_symbols = scanner.get_top_symbols(limit=5)
+        top_symbols_data = scanner.get_top_symbols(market_type=market_type, limit=10)
+        top_symbols = [(excd, sym) for excd, sym in top_symbols_data]
+        if not top_symbols:
+            raise ValueError("스캐너가 종목을 반환하지 않았습니다.")
     except Exception as e:
-        logger.error(f"상위 종목 스캔 실패: {e}. 기본 종목(TSLA, NVDA, AAPL, MSFT, AMD)으로 대체합니다.")
-        top_symbols = [("NAS", "TSLA"), ("NAS", "NVDA"), ("NAS", "AAPL"), ("NAS", "MSFT"), ("NAS", "AMD")]
+        if market_type == "KR":
+            top_symbols = [("J", "005930"), ("J", "000660"), ("J", "035720"), ("J", "035420")]
+        else:
+            top_symbols = [("NAS", "TSLA"), ("NAS", "NVDA"), ("NAS", "AAPL"), ("NAS", "MSFT"), ("NAS", "AMD")]
+        logger.error(f"상위 종목 스캔 실패: {e}. 기본 종목으로 대체합니다: {top_symbols}")
     
-    top_symbols = [
-        ("NAS", "TSLA"), ("NAS", "NVDA"), ("NAS", "AAPL"), 
-        ("NAS", "MSFT"), ("NAS", "AMZN"), ("NAS", "META"), ("NAS", "AMD")
-    ]
     results = []
     
-    # 3. 종목별 데이터 로드 및 백테스트 (최근 28일치)
+    # 3. 종목별 데이터 로드 및 백테스트
     for excd, symbol in top_symbols:
-        logger.info(f"=== {symbol} ({excd}) 데이터 수집 중 (28일) ===")
+        logger.info(f"=== {symbol} ({excd}) 데이터 수집 중 ({market_type}) ===")
         
         all_candles = []
-        start_dt = datetime.now() - timedelta(days=28)
-        
-        # 10,000개씩 조회하여 수집
-        for _ in range(3):
-            start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            candles = await alpaca.get_historical_candles(symbol, timeframe="1Min", limit=10000, start=start_str)
+        if market_type == "US":
+            start_dt = datetime.now() - timedelta(days=160)
+            end_dt = datetime.now() - timedelta(days=80)
+            end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # 10,000개씩 조회하여 수집 (최대 5번 = 50,000분)
+            for _ in range(5):
+                start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                candles = await alpaca.get_historical_candles(symbol, timeframe="1Min", limit=10000, start=start_str, end=end_str)
+                if not candles: break
+                all_candles.extend(candles)
+                try:
+                    last_dt = datetime.strptime(candles[-1]["time"], "%Y-%m-%dT%H:%M:%SZ")
+                    start_dt = last_dt + timedelta(minutes=1)
+                except: break
+                if len(candles) < 10000: break
+        else:
+            # KIS 국내 분봉 조회 (최근 수일치 수집 시도)
+            current_date = datetime.now()
+            days_to_fetch = 60 # 60영업일 수집
+            offset_days = 60   # [수정] 60일 이전(과거 60~120일) 데이터만 가져오도록 offset 설정
+            DATA_DAYS = 60
+            LIMIT_COUNT = 10
+            fetched_count = 0
             
-            if not candles:
-                break
+            for d in range(offset_days, offset_days + days_to_fetch * 2): # 주말을 고려해 여유있게 range 설정
+                target_date = current_date - timedelta(days=d)
+                if target_date.weekday() >= 5: continue # 주말 제외
                 
-            all_candles.extend(candles)
-            # 마지막 캔들의 시간 다음부터 다시 조회하도록 시간 업데이트
-            last_time_str = candles[-1]["time"]
-            # Alpaca 시간 형식 파싱: '2024-05-01T09:00:00Z'
-            try:
-                last_dt = datetime.strptime(last_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                start_dt = last_dt + timedelta(minutes=1)
-            except ValueError:
-                # 가끔 밀리초 포함된 경우 대응
-                last_dt = datetime.strptime(last_time_str[:19], "%Y-%m-%dT%H:%M:%S")
-                start_dt = last_dt + timedelta(minutes=1)
-                
-            if len(candles) < 10000: # 더 이상 데이터 없음
-                break
+                date_str = target_date.strftime("%Y%m%d")
+                # 15:30:00(장마감) 기준으로 과거 데이터 조회
+                res = api.get_domestic_minute_chart(symbol, "153000", date_str)
+                if res.get("output2"):
+                    day_candles = []
+                    for c in reversed(res["output2"]):
+                        # backtester가 기대하는 공통 포맷으로 변환
+                        day_candles.append({
+                            "time": f"{c['stck_bsop_date']} {c['stck_cntg_hour'][:2]}:{c['stck_cntg_hour'][2:4]}",
+                            "open": float(c["stck_oprc"]),
+                            "high": float(c["stck_hgpr"]),
+                            "low": float(c["stck_lwpr"]),
+                            "close": float(c["stck_prpr"]),
+                            "volume": float(c["cntg_vol"])
+                        })
+                    all_candles = day_candles + all_candles # 과거 데이터가 앞에 오도록
+                    fetched_count += 1
+                if fetched_count >= DATA_DAYS: break # [수정] 설정된 일수만큼 수집
         
         if not all_candles:
             logger.warning(f"{symbol} 데이터를 가져오지 못했습니다.")
             continue
             
         logger.info(f"총 {len(all_candles)}개의 1분봉 데이터 수집 완료. 백테스트 시작...")
-        tester = SMCBacktester(symbol, all_candles, ai_model=ai_model)
+        tester = SMCBacktester(symbol, all_candles, ai_model=ai_model, initial_capital=10000000.0)
         tester.run()
         print(f"[{symbol}] 백테스트 완료: PnL ${tester.capital - tester.initial_capital:.2f}, 진입 {len(tester.trades)}회")
         results.append({
@@ -387,18 +529,19 @@ async def main():
     print(f"TOTAL PnL: ${total_pnl:.2f}")
     print("="*50)
 
-    # 5. AI 학습용 CSV 저장
-    all_data = []
-    for r in results:
-        if "data_rows" in r:
-            all_data.extend(r["data_rows"])
-    
-    if all_data:
-        df_ai = pd.DataFrame(all_data)
-        # my_trading_bot/ai/ 폴더 내부에 데이터 저장
-        csv_path = os.path.join(base_dir, "my_trading_bot", "ai", "trading_data_for_ai.csv")
-        df_ai.to_csv(csv_path, index=False)
-        print(f"\n[AI Data Collection] {len(df_ai)}개의 매매 기록이 {csv_path}에 저장되었습니다.")
+    # 5. AI 학습용 CSV 저장 (OOS 백테스트 중에는 저장하지 않음)
+    # all_data = []
+    # for r in results:
+    #     if "data_rows" in r:
+    #         all_data.extend(r["data_rows"])
+    # 
+    # if all_data:
+    #     df_ai = pd.DataFrame(all_data)
+    #     # my_trading_bot/ai/ 폴더 내부에 데이터 저장
+    #     csv_path = os.path.join(base_dir, "my_trading_bot", "ai", "trading_data_for_ai.csv")
+    #     file_exists = os.path.isfile(csv_path)
+    #     df_ai.to_csv(csv_path, mode='a', header=not file_exists, index=False)
+    #     print(f"\n[AI Data Collection] {len(df_ai)}개의 매매 기록이 {csv_path}에 저장되었습니다.")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -234,38 +234,58 @@ class KISMarketHandler(KISBaseClient):
             "GB1": gb1
         }
         return self._call_market_api(path, tr_id, params)
-    # 13. [국내주식] 주식현재가 시세
-    def get_domestic_price(self, iscd: str, mrkt_div_code: str = "J") -> Dict[str, Any]:
-        """
-        국내주식 현재가 시세 조회
-        :param iscd: 종목코드 (6자리)
-        :param mrkt_div_code: 시장분류코드 (J: 주식, NX: NXT, UN: 통합)
-        """
-        path = "/uapi/domestic-stock/v1/quotations/inquire-price"
-        tr_id = "FHKST01010100"
-        params = {
-            "FID_COND_MRKT_DIV_CODE": mrkt_div_code,
-            "FID_INPUT_ISCD": iscd
-        }
-        return self._call_market_api(path, tr_id, params)
 
-    # 14. [국내주식] 주식일별분봉조회
-    def get_domestic_minute_chart(self, iscd: str, hour: str, date: str, mrkt_div_code: str = "J") -> Dict[str, Any]:
+    # 13. [국내주식] 주식일별분봉조회
+    def get_domestic_minute_chart(self, symbol: str, time: str = "153000", date: str = "", **kwargs) -> Dict[str, Any]:
         """
-        국내주식 일별 분봉 조회
-        :param iscd: 종목코드 (6자리)
-        :param hour: 입력 시간1 (HHMMSS)
-        :param date: 입력 날짜1 (YYYYMMDD)
-        :param mrkt_div_code: 시장분류코드 (J: 주식)
+        [국내주식] 주식일별분봉조회 (과거 일자 가능)
+        (TR_ID: FHKST03010230)
+        
+        :param symbol: 종목코드 (6자리)
+        :param time: 조회 시간 (HHMMSS)
+        :param date: 조회 일자 (YYYYMMDD), 비어있으면 오늘 날짜 사용 권장 (백테스트용)
         """
         path = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
         tr_id = "FHKST03010230"
+        if self.env_dv == "demo":
+            tr_id = "VHKST03010230"
+            
+        # date가 없으면 오늘 날짜 문자열 생성 (하지만 백테스트에서는 보통 넘겨줌)
+        if not date:
+            import datetime
+            date = datetime.datetime.now().strftime("%Y%m%d")
+            
         params = {
-            "FID_COND_MRKT_DIV_CODE": mrkt_div_code,
-            "FID_INPUT_ISCD": iscd,
-            "FID_INPUT_HOUR_1": hour,
+            "FID_COND_MRKT_DIV_CODE": "J", # KRX
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": time,
             "FID_INPUT_DATE_1": date,
-            "FID_PW_DATA_INCU_YN": "N",
-            "FID_FAKE_TICK_INCU_YN": "N"
+            "FID_PW_DATA_INCU_YN": kwargs.get("fid_pw_data_incu_yn", "Y"), # 과거 데이터 포함 여부
+            "FID_FAKE_TICK_INCU_YN": kwargs.get("fid_fake_tick_incu_yn", "")
+        }
+        return self._call_market_api(path, tr_id, params)
+
+    # 14. [국내주식] 주식 일별 시세
+    def get_domestic_daily_price(self, symbol: str, period_code: str = "D", adj_price_yn: str = "Y") -> Dict[str, Any]:
+        """
+        [국내주식] 주식 일별 시세 조회 (고가, 저가, 종가 등)
+        (TR_ID: FHKST01010400)
+        
+        :param symbol: 종목코드 (6자리)
+        :param period_code: 기간구분 (D:일, W:주, M:월)
+        :param adj_price_yn: 수정주가 여부 (Y:적용, N:미적용)
+        """
+        path = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        tr_id = "FHKST03010100" # 주식 당일/전일/시간외 챠트 데이터
+        if self.env_dv == "demo":
+            tr_id = "VHKST03010100"
+            
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_DATE_1": "19900101", # 시작일 (충분히 과거로 설정)
+            "FID_INPUT_DATE_2": "20991231", # 종료일
+            "FID_PERIOD_DIV_CODE": period_code,
+            "FID_ORG_ADJ_PRC": "0" if adj_price_yn == "Y" else "1"
         }
         return self._call_market_api(path, tr_id, params)

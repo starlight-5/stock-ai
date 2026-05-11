@@ -62,16 +62,19 @@ class PositionInfo:
     # 현재 남은 수량 (1차 청산 후 절반으로 줄어듦)
     remaining_qty: int = 0
     
-    # 손절 라인: 초기에는 FVG/OB 캔들 꼬리 기준, 1차 TP 체결 후 진입가로 상향
+    # 손절 라인: 현재 적용 중인 실시간 손절가
     sl_price: float = 0.0
+
+    # 초기 손절가: 트레일링 스탑 계산을 위한 진입 시점의 SL
+    initial_sl_price: float = 0.0
     
-    # 1차 익절 가격 (RR 1:1.5, 수수료 반영)
+    # 1차 익절 가격 (RR 3.0 이상)
     tp1_price: float = 0.0
     
-    # 2차 익절 가격 (유동성 풀 / 반대 방향 FVG / 고정 RR)
+    # 2차 익절 가격 (RR 4.0 이상 전량 익절 목표)
     tp2_price: float = 0.0
     
-    # 1차 익절 달성 여부 (달성 후 SL을 진입가로 이동)
+    # 1차 익절(또는 트레일링 스탑) 달성 여부
     tp1_hit: bool = False
     
     # 주문 ID (취소/정정 시 사용)

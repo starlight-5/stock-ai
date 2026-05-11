@@ -25,7 +25,7 @@ class AlpacaHandler:
             "Accept": "application/json"
         }
 
-    async def get_historical_candles(self, symbol: str, timeframe: str = "15Min", limit: int = 100, start: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_historical_candles(self, symbol: str, timeframe: str = "15Min", limit: int = 100, start: Optional[str] = None, end: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Alpaca API를 통해 과거 캔들 데이터를 조회합니다.
         
@@ -33,6 +33,7 @@ class AlpacaHandler:
         :param timeframe: 시간 단위 (1Min, 5Min, 15Min, 1Day 등)
         :param limit: 조회할 캔들 개수
         :param start: 시작 시간 (RFC3339 format, e.g. '2023-01-01T00:00:00Z')
+        :param end: 종료 시간 (RFC3339 format, e.g. '2023-01-01T00:00:00Z')
         :return: KIS 호환 형식의 캔들 리스트 [{'open', 'high', 'low', 'close'}, ...]
         """
         if not self.api_key or "your_alpaca" in self.api_key:
@@ -48,6 +49,8 @@ class AlpacaHandler:
         }
         if start:
             params["start"] = start
+        if end:
+            params["end"] = end
 
         try:
             async with aiohttp.ClientSession(headers=self.headers) as session:

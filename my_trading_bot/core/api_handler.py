@@ -105,10 +105,6 @@ class KISApiHandler:
         """[해외주식] 예약주문접수취소"""
         return self._order.order_overseas_resv_ccnl(*args, **kwargs)
 
-    def order_domestic_stock(self, *args, **kwargs) -> Dict[str, Any]:
-        """[국내주식] 주문 (현금 매수/매도)"""
-        return self._order.order_domestic_stock(*args, **kwargs)
-
     # ==========================================
     # [조회/계좌 API 위임]
     # ==========================================
@@ -159,10 +155,6 @@ class KISApiHandler:
     def inquire_algo_ccnl(self, *args, **kwargs) -> Dict[str, Any]:
         """[해외주식] 주문/계좌 > 해외주식 지정가체결내역조회"""
         return self._account.inquire_algo_ccnl(*args, **kwargs)
-
-    def inquire_domestic_balance(self, *args, **kwargs) -> Dict[str, Any]:
-        """[국내주식] 주식잔고조회"""
-        return self._account.inquire_domestic_balance(*args, **kwargs)
     # ==========================================
     # 기본 시세 (Market Data) 기능 위임
     # ==========================================
@@ -218,14 +210,12 @@ class KISApiHandler:
     def get_industry_price(self, excd: str, gb1: str = "0") -> Dict[str, Any]:
         """해외주식 업종별코드조회"""
         return self._market.get_industry_price(excd, gb1)
+        
+    def get_domestic_minute_chart(self, symbol: str, time: str = "153000", date: str = "", **kwargs) -> Dict[str, Any]:
+        return self._market.get_domestic_minute_chart(symbol, time, date, **kwargs)
 
-    def get_domestic_price(self, *args, **kwargs) -> Dict[str, Any]:
-        """[국내주식] 주식현재가 시세"""
-        return self._market.get_domestic_price(*args, **kwargs)
-
-    def get_domestic_minute_chart(self, *args, **kwargs) -> Dict[str, Any]:
-        """[국내주식] 주식일별분봉조회"""
-        return self._market.get_domestic_minute_chart(*args, **kwargs)
+    def get_domestic_daily_price(self, symbol: str, period_code: str = "D", adj_price_yn: str = "Y") -> Dict[str, Any]:
+        return self._market.get_domestic_daily_price(symbol, period_code, adj_price_yn)
         
     # ==========================================
     # 시세 분석 (Market Analysis) 기능 위임
@@ -264,7 +254,7 @@ class KISApiHandler:
         return self._analysis.get_trade_turnover(excd, **kwargs)
 
     def get_domestic_volume_rank(self, market: str = "J", rank_type: str = "0", **kwargs) -> Dict[str, Any]:
-        """국내주식 거래량/거래금액 순위"""
+        """[국내주식] 거래량/거래금액 순위 조회"""
         return self._analysis.get_domestic_volume_rank(market, rank_type, **kwargs)
 
     # ==========================================
@@ -293,14 +283,6 @@ class KISApiHandler:
     def get_ccnl_notice_req(self, hts_id: str, tr_type: str = "1") -> str:
         """해외주식 실시간체결통보 구독 요청 문자열 생성"""
         return self._websocket.get_ccnl_notice_req(hts_id, tr_type)
-
-    def get_domestic_price_req(self, symb: str, tr_type: str = "1") -> str:
-        """국내주식 실시간체결가 구독 요청 문자열 생성"""
-        return self._websocket.get_domestic_price_req(symb, tr_type)
-
-    def get_domestic_ccnl_notice_req(self, hts_id: str, tr_type: str = "1") -> str:
-        """국내주식 실시간체결통보 구독 요청 문자열 생성"""
-        return self._websocket.get_domestic_ccnl_notice_req(hts_id, tr_type)
 
     async def connect_and_listen_ws(self, requests_payloads: list, callback, 
                                    new_req_queue: Optional[asyncio.Queue] = None):

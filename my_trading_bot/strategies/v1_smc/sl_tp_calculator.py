@@ -25,12 +25,17 @@ logger = logging.getLogger(__name__)
 
 def calc_sl_price(candles_entry: List[Dict[str, Any]], direction: str = "long") -> Optional[float]:
     """
-    진입 타임프레임(예: 1분봉)에서 신호 캔들(FVG/OB를 형성한 캔들)의 꼬리를 손절 라인으로 설정합니다.
-    
-    - 롱(매수) 방향: 신호 캔들의 저가(low)를 SL로 사용
-    - 숏(매도) 방향: 신호 캔들의 고가(high)를 SL로 사용
-    
-    :param candles_entry: 진입 타임프레임 캔들 원시 데이터 리스트
+    [개선] 구조적 SL(Structural Stop-Loss) 방식으로 손절가를 계산합니다.
+
+    SMC(Smart Money Concepts) 관점에서 손절가는 "가격 구조가 바뀌는 지점"에 두어야 합니다.
+    단순 ATR 배수가 아닌, 최근 스윙 로우(Swing Low, 눌림의 최저점) 아래에
+    ATR 버퍼를 추가하여 시장 노이즈(휩소)에 의한 불필요한 손절을 방지합니다.
+
+    [로직]
+      롱 방향: 최근 3~10봉 중 가장 낮은 저가(Swing Low) - (ATR × 0.3)
+      숏 방향: 최근 3~10봉 중 가장 높은 고가(Swing High) + (ATR × 0.3)
+
+    :param candles_entry: 진입 타임프레임 캔들 원시 데이터 리스트 (최근 캔들이 마지막)
     :param direction: 매매 방향 ('long' 또는 'short')
     :return: 손절가 (float), 계산 불가 시 None
     """
@@ -38,35 +43,47 @@ def calc_sl_price(candles_entry: List[Dict[str, Any]], direction: str = "long") 
         logger.warning("SL 계산 실패: 캔들 데이터가 없습니다.")
         return None
 
-    # 가장 최근 신호 캔들을 기준으로 사용 (리스트의 마지막 캔들)
-    signal_candle = candles_entry[-1]
-    
-    # ATR 계산 (최근 5봉 기준 변동성 확보)
+    # ── ATR 계산 (14봉 기준, 버퍼 크기 결정에 사용) ──
     try:
-        highs = np.array([float(c.get("high", c.get("hipr", 0))) for c in candles_entry[-14:]])
-        lows = np.array([float(c.get("low", c.get("lopr", 0))) for c in candles_entry[-14:]])
+        highs  = np.array([float(c.get("high",  c.get("hipr", 0))) for c in candles_entry[-14:]])
+        lows   = np.array([float(c.get("low",   c.get("lopr", 0))) for c in candles_entry[-14:]])
         closes = np.array([float(c.get("close", c.get("stck_prpr", 0))) for c in candles_entry[-14:]])
-        
+
         tr1 = highs - lows
         tr2 = np.abs(highs - np.roll(closes, 1))
-        tr3 = np.abs(lows - np.roll(closes, 1))
-        tr = np.maximum(np.maximum(tr1, tr2), tr3)[1:] # 첫 항 제외
-        atr = np.mean(tr) if len(tr) > 0 else 0
-    except:
-        atr = 0
+        tr3 = np.abs(lows  - np.roll(closes, 1))
+        tr  = np.maximum(np.maximum(tr1, tr2), tr3)[1:]
+        atr = float(np.mean(tr)) if len(tr) > 0 else 0.0
+    except Exception:
+        atr = 0.0
 
     try:
+        # ── 스윙 구조 탐색: 최근 3~10봉 구간 사용 ──
+        # 너무 짧으면 의미 없는 노이즈, 너무 길면 SL이 너무 멀어짐
+        lookback = min(10, len(candles_entry))
+        recent_candles = candles_entry[-lookback:]
+
         if direction == "long":
-            # 롱 진입: 최근 저가 - (1.5 * ATR)
-            low_val = float(signal_candle.get("low", signal_candle.get("lopr", 0)))
-            sl = low_val - (1.5 * atr) if atr > 0 else low_val * 0.995 # ATR 없으면 최소 0.5%
+            # 스윙 로우: 최근 구간에서 가장 낮은 저가를 구조적 지지선으로 사용
+            swing_low = min(
+                float(c.get("low", c.get("lopr", 0))) for c in recent_candles
+            )
+            # SL = 스윙 로우 - ATR 버퍼(0.3배)로 노이즈 이탈 방어
+            # ATR이 없으면 현재가 대비 1.2% 아래를 기본값으로 사용
+            atr_buffer = atr * 0.3 if atr > 0 else swing_low * 0.012
+            sl = swing_low - atr_buffer
+
         else:
-            # 숏 진입: 최근 고가 + (1.5 * ATR)
-            high_val = float(signal_candle.get("high", signal_candle.get("hipr", 0)))
-            sl = high_val + (1.5 * atr) if atr > 0 else high_val * 1.005
-        
+            # 스윙 하이: 최근 구간에서 가장 높은 고가를 구조적 저항선으로 사용
+            swing_high = max(
+                float(c.get("high", c.get("hipr", 0))) for c in recent_candles
+            )
+            atr_buffer = atr * 0.3 if atr > 0 else swing_high * 0.012
+            sl = swing_high + atr_buffer
+
         logger.info(f"SL 계산 완료: {sl:.4f} (ATR={atr:.4f}, 방향={direction})")
         return sl
+
     except (ValueError, TypeError) as e:
         logger.error(f"SL 계산 중 오류 발생: {e}")
         return None

@@ -184,6 +184,7 @@ async def main():
     market_type = os.getenv("MARKET_TYPE", "KR") # .env 또는 환경변수로 선택
     
     api = KISApiHandler(os.getenv("KIS_APP_KEY"), os.getenv("KIS_APP_SECRET"), os.getenv("KIS_ENV", "demo"))
+    api.issue_access_token()
     alpaca = AlpacaHandler(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"))
     
     # AI 모델 로드 생략 (필요 시 XGBClassifier 추가)
@@ -212,8 +213,8 @@ async def main():
                     all_candles.append({
                         "time": f"{c['stck_bsop_date']} {c['stck_cntg_hour'][:2]}:{c['stck_cntg_hour'][2:4]}",
                         "open": float(c["stck_oprc"]),
-                        "high": float(c["stck_hipr"]),
-                        "low": float(c["stck_lopr"]),
+                        "high": float(c["stck_hgpr"]),
+                        "low": float(c["stck_lwpr"]),
                         "close": float(c["stck_prpr"]),
                         "volume": float(c["cntg_vol"])
                     })
