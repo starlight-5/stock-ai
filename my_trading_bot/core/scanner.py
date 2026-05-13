@@ -129,11 +129,22 @@ class RankScanner:
         final_symbols: Set[Tuple[str, str]] = set()
         logger.info(f"[Scanner] 후보 {len(raw_symbols)}개 종목 변동성 분석 시작 (기준: {min_vol}%)...")
         
-        for excd, symbol in raw_symbols:
+        import time
+        for i, (excd, symbol) in enumerate(raw_symbols):
+            # 초당 호출 제한(20회) 방지를 위해 매 10종목마다 또는 매번 아주 짧게 대기
+            if i > 0 and i % 15 == 0:
+                time.sleep(1.0) # 15종목마다 1초 휴식
+            else:
+                time.sleep(0.02) # 기본 0.02초 대기
+                
             vol_score = self._get_atr_volatility(excd, symbol)
             if vol_score >= min_vol:
                 final_symbols.add((excd, symbol))
-                if len(final_symbols) >= limit * 2: break # 목표 개수 채우면 중단
+                if len(final_symbols) >= limit: # 목표 개수 채우면 중단
+                    break
             
-        logger.info(f"[Scanner] 최종 선정된 종목 수: {len(final_symbols)}개")
+        if not final_symbols:
+            logger.warning(f"[Scanner] 변동성 {min_vol}% 이상인 종목을 찾지 못했습니다. (후보군 {len(raw_symbols)}개)")
+        else:
+            logger.info(f"[Scanner] 최종 선정된 종목 수: {len(final_symbols)}개")
         return final_symbols
