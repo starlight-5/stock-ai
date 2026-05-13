@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # [설정] 데이터 수집 모드 (True일 경우 AI 필터가 걸러도 진입하여 결과를 기록합니다)
-COLLECT_DATA_MODE = True
+COLLECT_DATA_MODE = False
 
 load_dotenv(find_dotenv())
 
