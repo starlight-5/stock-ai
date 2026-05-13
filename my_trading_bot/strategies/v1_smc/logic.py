@@ -614,12 +614,12 @@ class V1SmcBot(BaseStrategy):
         pos = self._pos
 
         # ── [트레일링 수익 확보] ──
-        # 수익이 리스크의 2배(2.0R) 도달 시, 손절가를 1.0R 수익 지점으로 상향하여 수익 확정
-        r_dist = pos.entry_price - pos.initial_sl_price
-        if not pos.tp1_hit and price >= (pos.entry_price + r_dist * 2.0):
-            pos.sl_price = pos.entry_price + r_dist * 1.0
-            pos.tp1_hit = True # 트레일링 발동 플래그로 재사용
-            logger.info(f"[5단계] 트레일링 스탑 발동: 1.0R 수익 확보 (SL={pos.sl_price:.4f})")
+        # 수익이 TP1(약 2.0R) 도달 시, 손절가를 진입가 + 0.2% 지점으로 상향하여 수수료 포함 본절 확보
+        if not pos.tp1_hit and price >= pos.tp1_price:
+            # 진입가 대비 0.2% 위로 설정 (수수료 방어)
+            pos.sl_price = pos.entry_price * 1.002 
+            pos.tp1_hit = True
+            logger.info(f"[5단계] TP1 달성 및 본절 SL 상향: 0.2% 수익 확보 (SL={pos.sl_price:.4f})")
             if self.on_trade:
                 await self.on_trade(self.symbol, "TRAILING_STOP", {"price": price, "new_sl": pos.sl_price})
             return
