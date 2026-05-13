@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-[AI 전략 최적화 비교 + 피보나치] backtest_validation.py
-4가지 개선 아이디어의 조합을 테스트합니다.
-1. AI 임계치 강화 (0.5 -> 0.7)
-2. 손절가 여유 (0.8% -> 1.0%)
-3. 변동성 폭탄 필터 (ATR 기반 장대봉 진입 금지)
-4. 피보나치 0.5 룰 (최근 파동의 50% 이하 Discount 구간에서만 진입)
+[공격적 수익 창출 모드] backtest_validation.py
+필터를 최적화하여 매매 횟수를 늘리고 수익률을 극대화합니다.
+1. AI 임계치 완화 (0.7 -> 0.6)
+2. 추세 필터 제거 (하락 후 반등 변곡점 공략)
+3. 종목 유니버스 확대 (5종목 -> 10종목)
 """
 
 import asyncio
@@ -13,10 +12,8 @@ import os
 import logging
 from datetime import datetime, timedelta
 import pandas as pd
-import numpy as np
 from dotenv import load_dotenv, find_dotenv
 
-from my_trading_bot.core.api_handler import KISApiHandler
 from my_trading_bot.core.alpaca_handler import AlpacaHandler
 from my_trading_bot.strategies.v1_smc.poi_detector import (
     detect_fvg, detect_ob, calculate_atr, is_price_in_poi, is_overlapping
@@ -35,23 +32,18 @@ except ImportError:
     AI_AVAILABLE = False
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 load_dotenv(find_dotenv())
 
 class SMCBacktester:
-    def __init__(self, symbol, candles, ai_model=None, 
-                 ai_threshold=0.5, min_risk_pct=0.008, vol_filter_on=False, fibo_filter_on=False):
+    def __init__(self, symbol, candles, ai_model=None, ai_threshold=0.6, min_risk_pct=0.008):
         self.symbol = symbol
         self.df = pd.DataFrame(candles)
         self.initial_capital = 10000000.0
         self.capital = self.initial_capital
         self.ai_model = ai_model
-        
         self.ai_threshold = ai_threshold
         self.min_risk_pct = min_risk_pct
-        self.vol_filter_on = vol_filter_on
-        self.fibo_filter_on = fibo_filter_on
         
         self.trades = []
         self.state = "MONITORING"
@@ -110,7 +102,8 @@ class SMCBacktester:
                 atr_1m = calculate_atr(candles_1m)
                 fvg_1m = detect_fvg(candles_1m, atr=atr_1m)
                 ob_1m = detect_ob(candles_1m, fvg_1m)
-                entry_pois = [z for z in (fvg_1m + ob_1m) if z["type"] == "bullish" and is_overlapping(self.active_poi, z)]
+                # 5m/1m POI 겹침 조건 완화 (단순히 1m POI만 있어도 진입 허용 고려)
+                entry_pois = [z for z in (fvg_1m + ob_1m) if z["type"] == "bullish"]
                 
                 if is_price_in_poi(price, entry_pois):
                     self._execute_entry(price, past_df, current_candle)
@@ -120,35 +113,27 @@ class SMCBacktester:
 
     def _execute_entry(self, price, past_df, candle):
         curr_time = candle['time']
+        # 킬존 완화 (장 초반 30분만 피함)
         et_dt = pd.to_datetime(curr_time, utc=True).tz_convert('America/New_York')
-        if (et_dt.hour == 9 and et_dt.minute >= 30) or (et_dt.hour == 10 and et_dt.minute < 30): return
+        if (et_dt.hour == 9 and et_dt.minute < 30): return
 
         df_5m = pd.DataFrame(self._resample_to_5m(past_df.iloc[-500:]))
-        ema50 = df_5m['close'].ewm(span=50).mean().iloc[-1]
-        if price < ema50: return
+        # 추세 필터 제거 (역추세 반등 공략)
 
-        # [개선 ③] 변동성 필터
-        if self.vol_filter_on:
-            last_5m_body = abs(df_5m.iloc[-1]['close'] - df_5m.iloc[-1]['open'])
-            atr_5m = calculate_atr(df_5m.to_dict('records'))
-            if last_5m_body > atr_5m * 1.5: return
-
-        # [개선 ④] 피보나치 되돌림 필터 (Discount Only)
-        if self.fibo_filter_on:
-            # 최근 100분(20개 5분봉) 동안의 최고점/최저점 파악
-            leg_high = df_5m.iloc[-20:]['high'].max()
-            leg_low = df_5m.iloc[-20:]['low'].min()
-            equilibrium = (leg_high + leg_low) / 2
-            if price > equilibrium: return # Premium 구간이면 매수 금지
+        # 피보나치 0.618로 완화 (더 많은 기회)
+        leg_high = df_5m.iloc[-20:]['high'].max()
+        leg_low = df_5m.iloc[-20:]['low'].min()
+        fibo_618 = leg_high - (leg_high - leg_low) * 0.382 # 0.618 레벨
+        if price > fibo_618: return
 
         candles_1m = past_df.iloc[-20:].to_dict('records')
         sl = calc_sl_price(candles_1m, direction="long")
-        if not sl or sl >= price: sl = price * 0.988
+        if not sl or sl >= price: sl = price * 0.99 
         
-        # [개선 ②] 리스크 필터
-        if (price - sl) / price < self.min_risk_pct: return
+        # 리스크 최소화 (0.5%만 되어도 진입)
+        if (price - sl) / price < 0.005: return
 
-        # [개선 ①] AI 필터 (Threshold 조정)
+        # AI 필터 (0.6으로 완화)
         if self.ai_model:
             df_5m_ind = self._calculate_indicators(df_5m)
             last_5 = df_5m_ind.iloc[-1]
@@ -190,7 +175,7 @@ class SMCBacktester:
             self.capital += pnl
             self.trades.append(pnl)
             pos["remaining_qty"] -= close_qty
-            pos["sl"] = pos["entry_price"] * 1.002
+            pos["sl"] = pos["entry_price"] * 1.001 # 본절가 이동
             pos["tp1_hit"] = True
             if pos["remaining_qty"] <= 0: self.state = "MONITORING"
             return
@@ -207,46 +192,35 @@ async def main():
     if os.path.exists(model_path) and AI_AVAILABLE:
         ai_model = XGBClassifier(); ai_model.load_model(model_path)
 
-    symbols = ["TSLA", "NVDA", "AAPL", "MSFT", "AMD"]
+    # 종목 리스트 10개로 확대
+    symbols = ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "SMCI", "ARM", "NFLX"]
     market_data = {}
-    print(f"=== 검증용 데이터 {len(symbols)}종목 로드 중... ===")
+    print(f"=== [공격 모드] 데이터 {len(symbols)}종목 로드 중... ===")
     for sym in symbols:
-        start_dt = datetime.now() - timedelta(days=100)
-        end_dt = datetime.now() - timedelta(days=80)
+        # 최근 30일 데이터로 테스트 (더 최신 트렌드 반영)
+        start_dt = datetime.now() - timedelta(days=40)
+        end_dt = datetime.now() - timedelta(days=10)
         market_data[sym] = await alpaca.get_historical_candles(sym, timeframe="1Min", limit=10000, start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    # 비교 조합 설정 (핵심 조합 위주)
+    # 공격 모드 설정 비교
     configs = [
-        {"name": "기본(Base)", "ai": 0.5, "sl": 0.008, "vol": False, "fibo": False},
-        {"name": "조합1(AI강화)", "ai": 0.7, "sl": 0.008, "vol": False, "fibo": False},
-        {"name": "조합8(피보나치)", "ai": 0.5, "sl": 0.008, "vol": False, "fibo": True},
-        {"name": "조합9(AI+피보)", "ai": 0.7, "sl": 0.008, "vol": False, "fibo": True},
-        {"name": "최강조합(AI+피보+필터)", "ai": 0.7, "sl": 0.010, "vol": True, "fibo": True},
+        {"name": "현재(Safe)", "ai": 0.7, "risk": 0.008},
+        {"name": "공격(Aggressive)", "ai": 0.6, "risk": 0.005},
     ]
 
-    final_results = []
-    print(f"\n=== 전략 조합 테스트 시작 (피보나치 추가) ===")
-    
+    print(f"\n=== 수익 극대화 모드 테스트 시작 ===")
     for cfg in configs:
         total_pnl = 0; total_trades = 0; win_trades = 0
         for sym, candles in market_data.items():
             if not candles: continue
-            tester = SMCBacktester(sym, candles, ai_model, cfg['ai'], cfg['sl'], cfg['vol'], cfg['fibo'])
+            tester = SMCBacktester(sym, candles, ai_model, cfg['ai'], cfg['risk'])
             tester.run()
             total_pnl += (tester.capital - tester.initial_capital)
             total_trades += len(tester.trades)
             win_trades += len([t for t in tester.trades if t > 0])
             
         win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
-        final_results.append({"name": cfg['name'], "pnl": total_pnl, "trades": total_trades, "win_rate": win_rate})
-        print(f"[{cfg['name']}] 완료: PnL ${total_pnl:,.2f}, 승률 {win_rate:.2f}%")
-
-    print("\n" + "="*70)
-    print(f"{'조합명':<20} | {'PnL (Total)':<15} | {'매매':<4} | {'승률':<8}")
-    print("-" * 70)
-    for r in sorted(final_results, key=lambda x: x['pnl'], reverse=True):
-        print(f"{r['name']:<20} | ${r['pnl']:>13,.2f} | {r['trades']:<4} | {r['win_rate']:>7.2f}%")
-    print("="*70)
+        print(f"[{cfg['name']}] PnL: ${total_pnl:,.2f} | 매매: {total_trades}회 | 승률: {win_rate:.2f}%")
 
 if __name__ == "__main__":
     asyncio.run(main())
