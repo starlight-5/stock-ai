@@ -221,22 +221,20 @@ class SMCBacktester:
             return False  # 오류 시 보수적으로 진입 차단
 
     def _is_kill_zone(self, curr_dt: pd.Timestamp) -> bool:
+        """
+        [동기화] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다. (ET 기준)
+        백테스트 데이터(UTC)를 ET로 변환하여 서머타임을 자동으로 처리합니다.
+        """
+        # UTC 시간을 미국 동부 시간(ET)으로 변환
+        et_dt = curr_dt.tz_convert('America/New_York')
+        h = et_dt.hour
+        m = et_dt.minute
 
-        """
-        [개선] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다.
-        개장 후 첫 1시간(UTC 14:30~15:30)은 유동성 헌팅이 극심하여
-        일반 FVG 진입 시 휩소 손절 위험이 매우 높습니다. 이 시간대 진입을 차단합니다.
-        :param curr_dt: 현재 캔들의 UTC 기준 시간
-        :return: True면 진입 차단 구간
-        """
-        h = curr_dt.hour
-        m = curr_dt.minute
-        # UTC 14:30 ~ 15:30 구간 차단
-        if h == KILL_ZONE_START_UTC_HOUR and m >= 30:
-            return True
-        if h == KILL_ZONE_END_UTC_HOUR and m < KILL_ZONE_MINUTE_END:
-            return True
-        return False
+        # ET 기준 09:30 ~ 10:30 구간 차단
+        is_after_start = (h > 9) or (h == 9 and m >= 30)
+        is_before_end = (h < 10) or (h == 10 and m < 30)
+
+        return is_after_start and is_before_end
 
     def _execute_entry(self, price, past_df, curr_time):
         # [개선 ①] 킬존(Kill Zone) 시간대 진입 차단
@@ -257,10 +255,9 @@ class SMCBacktester:
         if not sl or sl >= price:
             sl = price * 0.988  # 구조적 SL 실패 시 1.2% 기본 여유
 
-        # 리스크 거리가 너무 좁으면(0.5% 미만) 진입 포기
-        # [개선] 0.7% → 0.5% : 구조적 SL로 SL 위치가 더 넓어졌으므로 최소 기준 완화
+        # [동기화] 최소 리스크 거리 필터 (0.8% 이상만 진입)
         risk_pct = (price - sl) / price
-        if risk_pct < 0.005:
+        if risk_pct < 0.008:
             return
 
         tp1 = calc_tp1(price, sl)
@@ -352,10 +349,10 @@ class SMCBacktester:
             self.trades.append({"symbol": self.symbol, "type": "TP1", "pnl": pnl_partial, "time": curr_time})
             logger.info(f"  [EXIT-TP1 PARTIAL] {curr_time} | Qty: {close_qty}, PnL: {pnl_partial:.2f}")
 
-            # [개선] Breakeven: 나머지 물량의 SL을 진입가로 이동 → 무위험(Risk-Free) 상태
-            pos["sl"] = pos["entry_price"]
+            # [동기화] Breakeven: 나머지 물량의 SL을 진입가 + 0.2%로 이동 (수수료 방어)
+            pos["sl"] = pos["entry_price"] * 1.002
             pos["tp1_hit"] = True
-            logger.info(f"  [BREAKEVEN] SL 진입가({pos['entry_price']:.2f})로 이동 완료")
+            logger.info(f"  [BREAKEVEN] SL 상향({pos['sl']:.2f})으로 이동 완료 (수수료 방어)")
 
             # 나머지 수량이 없으면 포지션 종료
             if pos["remaining_qty"] <= 0:
