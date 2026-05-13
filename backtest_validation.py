@@ -200,8 +200,9 @@ class SMCBacktester:
             self.state = "MONITORING"
 
 async def main():
-    api = KISApiHandler(os.getenv("KIS_APP_KEY"), os.getenv("KIS_APP_SECRET"))
-    api.issue_access_token()
+    # 백테스트는 Alpaca 데이터를 사용하므로 KIS 토큰 발급 생략 (1분 제한 방지)
+    # api = KISApiHandler(os.getenv("KIS_APP_KEY"), os.getenv("KIS_APP_SECRET"))
+    # api.issue_access_token()
     alpaca = AlpacaHandler(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"))
     
     ai_model = None
