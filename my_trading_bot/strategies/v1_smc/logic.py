@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
@@ -44,6 +45,7 @@ from .params import (
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT,
     TP1_CLOSE_RATIO, BUY_DVSN, SELL_DVSN, ORDER_TYPE_MARKET,
     AI_PROB_THRESHOLD,
+    KILL_ZONE_START_UTC_HOUR, KILL_ZONE_END_UTC_HOUR, KILL_ZONE_MINUTE_END,
 )
 from .poi_detector import (
     detect_fvg, detect_ob, is_price_in_poi, calculate_atr, is_overlapping
@@ -455,6 +457,18 @@ class V1SmcBot(BaseStrategy):
             
         self._is_ordering = True
         try:
+            # [신규 필터 1] 킬 존(Kill Zone) 시간대 진입 차단
+            if self._is_kill_zone():
+                logger.info(f"[{self.symbol}] 킬 존(Kill Zone) 시간대 진입 차단 (높은 변동성 위험)")
+                self._is_ordering = False
+                return
+
+            # [신규 필터 2] HTF 추세 필터 (15분봉 EMA50 + HH/HL)
+            if not await self._is_uptrend():
+                # _is_uptrend 내부에서 상세 로그를 남기므로 여기서는 리턴만 수행
+                self._is_ordering = False
+                return
+
             # AI 필터링 (XGBoost)
             if self._ai_model:
                 features = self._calculate_indicators(self._candles_entry)
@@ -657,6 +671,81 @@ class V1SmcBot(BaseStrategy):
             self._poi_zones_entry = []
             self._state = BotState.MONITORING
             logger.info(f"[{self.symbol}] [사이클 종료] 다음 매매 사이클 대기 시작 → MONITORING")
+
+    # ──────────────────────────────────────────────
+    # [내부 헬퍼 메서드 - 필터링 로직]
+    # ──────────────────────────────────────────────
+
+    def _is_kill_zone(self) -> bool:
+        """
+        [개선] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다.
+        개장 후 첫 1시간(UTC 14:30~15:30)은 유동성 헌팅이 극심하여 
+        진입 시 휩소 손절 위험이 매우 높습니다.
+        """
+        now_utc = datetime.now(timezone.utc)
+        h = now_utc.hour
+        m = now_utc.minute
+
+        # UTC 14:30 ~ 15:30 구간 차단
+        if h == KILL_ZONE_START_UTC_HOUR and m >= 30:
+            return True
+        if h == KILL_ZONE_END_UTC_HOUR and m < KILL_ZONE_MINUTE_END:
+            return True
+        return False
+
+    async def _is_uptrend(self) -> bool:
+        """
+        [신규] HTF(Higher Time Frame) 추세 필터.
+        SMC 핵심 원칙: 상위 타임프레임 추세 방향과 같은 방향으로만 진입합니다.
+        하락 추세 중 롱 진입은 절대 금지합니다.
+
+        [판단 로직]
+        1. EMA50 조건: 최근 15분봉 종가 > EMA50 (중기 상승 추세)
+        2. 가격 구조 조건: 최근 10개 15분봉 기준 HH(Higher High) / HL(Higher Low) 구조 확인
+        """
+        try:
+            # 15분봉 데이터 100개 조회 (EMA50 계산을 위해 충분한 양 확보)
+            res = await asyncio.to_thread(
+                self._api.get_time_itemchartprice,
+                self.excd, self.symbol,
+                "15", "1", "100",
+            )
+            candles_15m = self._extract_candles(res)
+            if len(candles_15m) < 60:
+                logger.warning(f"[{self.symbol}] 15분봉 데이터 부족({len(candles_15m)}개)으로 추세 판단 불가")
+                return False
+
+            closes = np.array([float(c["close"]) for c in candles_15m])
+            highs = np.array([float(c["high"]) for c in candles_15m])
+            lows = np.array([float(c["low"]) for c in candles_15m])
+
+            # 1. EMA50 계산
+            # Pandas를 사용하여 지수이동평균 계산
+            ema50 = pd.Series(closes).ewm(span=50, adjust=False).mean().iloc[-1]
+            current_price = closes[-1]
+            ema_uptrend = current_price > ema50
+
+            # 2. 가격 구조 (HH/HL)
+            # 최근 10개 봉을 전반/후반 5개로 나눠 고점/저점 비교
+            prev_high = np.max(highs[-10:-5])
+            curr_high = np.max(highs[-5:])
+            prev_low = np.min(lows[-10:-5])
+            curr_low = np.min(lows[-5:])
+
+            structure_uptrend = (curr_high > prev_high) and (curr_low > prev_low)
+
+            if not (ema_uptrend and structure_uptrend):
+                logger.info(
+                    f"[{self.symbol}] [추세 필터 차단] EMA_UP={ema_uptrend}, HH/HL={structure_uptrend} "
+                    f"(Price={current_price:.2f}, EMA50={ema50:.2f})"
+                )
+                return False
+            
+            return True
+
+        except Exception as e:
+            logger.error(f"[{self.symbol}] 추세 필터 계산 중 오류: {e}")
+            return False # 오류 시 보수적으로 진입 차단
 
     # ──────────────────────────────────────────────
     # [내부 헬퍼 메서드]
