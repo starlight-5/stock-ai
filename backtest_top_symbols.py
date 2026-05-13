@@ -23,7 +23,7 @@ from my_trading_bot.strategies.v1_smc.sl_tp_calculator import (
 from my_trading_bot.strategies.v1_smc.params import (
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT, ATR_PERIOD,
     TP1_RR_RATIO, TRADE_RISK_RATIO, COMMISSION_RATE, AI_PROB_THRESHOLD,
-    TP1_CLOSE_RATIO, KILL_ZONE_START_UTC_HOUR, KILL_ZONE_END_UTC_HOUR, KILL_ZONE_MINUTE_END
+    TP1_CLOSE_RATIO
 )
 
 try:
@@ -35,6 +35,9 @@ except ImportError:
 # 로깅 설정 (진행 상황 확인을 위해 INFO 레벨로 설정)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# [설정] 데이터 수집 모드 (True일 경우 AI 필터가 걸러도 진입하여 결과를 기록합니다)
+COLLECT_DATA_MODE = True
 
 load_dotenv(find_dotenv())
 
@@ -295,7 +298,10 @@ class SMCBacktester:
             prob = self.ai_model.predict_proba(input_data)[0][1]
             if prob < AI_PROB_THRESHOLD: # params.py에 설정된 임계치 사용
                 self.filtered_count += 1
-                return
+                if not COLLECT_DATA_MODE:
+                    return
+                else:
+                    logger.info(f"  [AI FILTER-SKIP] 데이터 수집을 위해 필터링 무시 후 진입 (확률: {prob:.2f})")
 
         self.current_pos = {
             "entry_price": price,
@@ -526,19 +532,19 @@ async def main():
     print(f"TOTAL PnL: ${total_pnl:.2f}")
     print("="*50)
 
-    # 5. AI 학습용 CSV 저장 (OOS 백테스트 중에는 저장하지 않음)
-    # all_data = []
-    # for r in results:
-    #     if "data_rows" in r:
-    #         all_data.extend(r["data_rows"])
-    # 
-    # if all_data:
-    #     df_ai = pd.DataFrame(all_data)
-    #     # my_trading_bot/ai/ 폴더 내부에 데이터 저장
-    #     csv_path = os.path.join(base_dir, "my_trading_bot", "ai", "trading_data_for_ai.csv")
-    #     file_exists = os.path.isfile(csv_path)
-    #     df_ai.to_csv(csv_path, mode='a', header=not file_exists, index=False)
-    #     print(f"\n[AI Data Collection] {len(df_ai)}개의 매매 기록이 {csv_path}에 저장되었습니다.")
+    # 5. AI 학습용 CSV 저장
+    all_data = []
+    for r in results:
+        if "data_rows" in r:
+            all_data.extend(r["data_rows"])
+    
+    if all_data:
+        df_ai = pd.DataFrame(all_data)
+        # my_trading_bot/ai/ 폴더 내부에 데이터 저장
+        csv_path = os.path.join(base_dir, "my_trading_bot", "ai", "trading_data_for_ai.csv")
+        file_exists = os.path.isfile(csv_path)
+        df_ai.to_csv(csv_path, mode='a', header=not file_exists, index=False)
+        print(f"\n[AI Data Collection] {len(df_ai)}개의 매매 기록이 {csv_path}에 저장되었습니다.")
 
 if __name__ == "__main__":
     asyncio.run(main())
