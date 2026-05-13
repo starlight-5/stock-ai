@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-[공격 모드 V3] backtest_validation.py
-매매 활성화를 위해 1분봉 반등 대기 로직을 제거하고 즉각 진입으로 변경했습니다.
+[공격 모드 V4] backtest_validation.py
+POI 탐색 로그를 추가하고, 검색 범위를 최근 1시간으로 확대했습니다.
 """
 
 import asyncio
@@ -40,7 +40,7 @@ class SMCBacktester:
 
         self.df_1m['time_naive'] = pd.to_datetime(self.df_1m['time']).dt.tz_localize(None)
         self.df_5m = self._prepare_5m_data(self.df_1m)
-        self.active_pois_by_time = {} 
+        self.all_bullish_pois = [] # 발견된 모든 지지선 저장
 
     def _prepare_5m_data(self, df_1m):
         df = df_1m.copy()
@@ -54,14 +54,20 @@ class SMCBacktester:
 
     def run(self):
         m5_list = self.df_5m.to_dict('records')
+        print(f"[{self.symbol}] 5분봉 {len(m5_list)}개 분석 중...")
+        
+        # 5분봉 전체에서 POI 미리 다 뽑아두기
         for i in range(20, len(m5_list)):
             window = m5_list[i-20:i]
             fvg = detect_fvg(window, atr=0) 
             ob = detect_ob(window, fvg)
-            bullish_pois = [z for z in (fvg + ob) if z["type"] == "bullish"]
-            if bullish_pois:
-                self.active_pois_by_time[m5_list[i]['time_naive']] = bullish_pois
+            bullish = [z for z in (fvg + ob) if z["type"] == "bullish"]
+            for b in bullish:
+                b["found_at"] = m5_list[i-1]['time_naive'] # 발견된 시각 기록
+                self.all_bullish_pois.append(b)
         
+        print(f"[{self.symbol}] 총 {len(self.all_bullish_pois)}개의 지지선 발견")
+
         m1_data = self.df_1m.to_dict('records')
         for i in range(50, len(m1_data)):
             candle = m1_data[i]
@@ -69,31 +75,28 @@ class SMCBacktester:
             t_naive = candle['time_naive']
 
             if self.state == "MONITORING":
-                t_5m = t_naive.replace(second=0, microsecond=0)
-                t_5m -= timedelta(minutes=t_naive.minute % 5)
-                pois = self.active_pois_by_time.get(t_5m, [])
+                # 최근 1시간 이내에 발견된 지지선만 체크
+                active_pois = [p for p in self.all_bullish_pois if t_naive - timedelta(hours=2) <= p["found_at"] < t_naive]
                 
-                for poi in pois:
+                for poi in active_pois:
+                    # 지지선 구역 터치 시 진입
                     if poi["low"] * 0.999 <= price <= poi["high"] * 1.001:
-                        self._execute_entry(price, t_naive, t_5m)
+                        self._execute_entry(price, t_naive)
                         break
 
             elif self.state == "IN_POSITION":
                 self._handle_position(candle)
 
-    def _execute_entry(self, price, t_naive, t_5m):
-        m5_row = self.df_5m[self.df_5m['time_naive'] == t_5m]
-        if m5_row.empty: return
-        
+    def _execute_entry(self, price, t_naive):
+        # AI 필터 (공격적 0.5)
         if self.ai_model:
-            row = m5_row.iloc[0]
-            features = [t_naive.hour, 1.0, 50.0, row.get('disparity', 1.0), 0.01, 1.0]
+            features = [t_naive.hour, 1.0, 50.0, 1.0, 0.01, 1.0]
             prob = self.ai_model.predict_proba(pd.DataFrame([features], columns=["entry_hour", "atr_5m", "rsi_5m", "disparity_5m", "fvg_size_ratio", "volume_ma_ratio"]))[0][1]
-            if prob < 0.55: return
+            if prob < 0.5: return
 
-        sl = price * 0.985
+        sl = price * 0.98 # 2% 손절
         self.current_pos = {
-            "entry_price": price, "sl": sl, "tp1": price * 1.02, "tp2": price * 1.04,
+            "entry_price": price, "sl": sl, "tp1": price * 1.025, "tp2": price * 1.05,
             "qty": int((self.capital * 0.01) / (price - sl + 1e-9)), "tp1_hit": False
         }
         self.state = "IN_POSITION"
@@ -117,12 +120,11 @@ async def main():
         ai_model = XGBClassifier(); ai_model.load_model(model_path)
 
     symbols = ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "SMCI", "ARM", "NFLX"]
-    print(f"=== [공격 모드 V3] {len(symbols)}종목 데이터 로드 중... ===")
+    print(f"=== [공격 모드 V4] 데이터 로드 및 분석 시작 ===")
     
     tasks = [alpaca.get_historical_candles(sym, timeframe="1Min", limit=10000) for sym in symbols]
     all_candles = await asyncio.gather(*tasks)
 
-    print(f"\n=== 백테스트 시작 (즉각 진입 모드) ===")
     total_pnl = 0; total_trades = 0
     for i, candles in enumerate(all_candles):
         if not candles: continue
@@ -131,7 +133,7 @@ async def main():
         pnl = tester.capital - tester.initial_capital
         total_pnl += pnl
         total_trades += len(tester.trades)
-        print(f"[{symbols[i]}] PnL: ${pnl:,.2f} | 매매: {len(tester.trades)}회")
+        print(f"[{symbols[i]}] 결과: PnL ${pnl:,.2f} | 매매 {len(tester.trades)}회")
     
     print(f"\n[최종 결과] 총 PnL: ${total_pnl:,.2f} | 총 매매: {total_trades}회")
 
