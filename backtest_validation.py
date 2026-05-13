@@ -214,9 +214,9 @@ async def main():
     market_data = {}
     print(f"=== 검증용 데이터 {len(symbols)}종목 로드 중... ===")
     for sym in symbols:
-        start_dt = datetime.now() - timedelta(days=120)
-        end_dt = datetime.now() - timedelta(days=60)
-        market_data[sym] = await alpaca.get_historical_candles(sym, timeframe="1Min", limit=15000, start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        start_dt = datetime.now() - timedelta(days=100)
+        end_dt = datetime.now() - timedelta(days=80)
+        market_data[sym] = await alpaca.get_historical_candles(sym, timeframe="1Min", limit=10000, start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     # 조합 정의
     configs = [
