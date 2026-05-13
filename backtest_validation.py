@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-[공격 모드 V4] backtest_validation.py
-POI 탐색 로그를 추가하고, 검색 범위를 최근 1시간으로 확대했습니다.
+[공격 모드 V5] backtest_validation.py
+과거 데이터 구간을 명시적으로 지정하여 데이터 부족 문제를 해결했습니다.
 """
 
 import asyncio
@@ -31,7 +31,6 @@ class SMCBacktester:
         self.symbol = symbol
         self.df_1m = df_1m
         self.ai_model = ai_model
-        
         self.initial_capital = 10000000.0
         self.capital = self.initial_capital
         self.trades = []
@@ -40,7 +39,7 @@ class SMCBacktester:
 
         self.df_1m['time_naive'] = pd.to_datetime(self.df_1m['time']).dt.tz_localize(None)
         self.df_5m = self._prepare_5m_data(self.df_1m)
-        self.all_bullish_pois = [] # 발견된 모든 지지선 저장
+        self.all_bullish_pois = []
 
     def _prepare_5m_data(self, df_1m):
         df = df_1m.copy()
@@ -48,55 +47,42 @@ class SMCBacktester:
         df_5m = df.resample('5min').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
-        df_5m['ma20'] = df_5m['close'].rolling(window=20).mean()
-        df_5m['disparity'] = df_5m['close'] / df_5m['ma20']
         return df_5m.reset_index()
 
     def run(self):
         m5_list = self.df_5m.to_dict('records')
-        print(f"[{self.symbol}] 5분봉 {len(m5_list)}개 분석 중...")
-        
-        # 5분봉 전체에서 POI 미리 다 뽑아두기
-        for i in range(20, len(m5_list)):
-            window = m5_list[i-20:i]
+        # 윈도우를 50으로 확대하여 더 넓은 구조 분석
+        for i in range(50, len(m5_list)):
+            window = m5_list[i-50:i]
+            # ATR 필터 없이 모든 지지선 수집
             fvg = detect_fvg(window, atr=0) 
             ob = detect_ob(window, fvg)
             bullish = [z for z in (fvg + ob) if z["type"] == "bullish"]
             for b in bullish:
-                b["found_at"] = m5_list[i-1]['time_naive'] # 발견된 시각 기록
+                b["found_at"] = m5_list[i-1]['time_naive']
                 self.all_bullish_pois.append(b)
         
-        print(f"[{self.symbol}] 총 {len(self.all_bullish_pois)}개의 지지선 발견")
-
         m1_data = self.df_1m.to_dict('records')
-        for i in range(50, len(m1_data)):
+        for i in range(100, len(m1_data)):
             candle = m1_data[i]
             price = candle['close']
             t_naive = candle['time_naive']
 
             if self.state == "MONITORING":
-                # 최근 1시간 이내에 발견된 지지선만 체크
-                active_pois = [p for p in self.all_bullish_pois if t_naive - timedelta(hours=2) <= p["found_at"] < t_naive]
-                
+                # 최근 4시간 이내 지지선 체크 (더 공격적)
+                active_pois = [p for p in self.all_bullish_pois if t_naive - timedelta(hours=4) <= p["found_at"] < t_naive]
                 for poi in active_pois:
-                    # 지지선 구역 터치 시 진입
                     if poi["low"] * 0.999 <= price <= poi["high"] * 1.001:
                         self._execute_entry(price, t_naive)
                         break
-
             elif self.state == "IN_POSITION":
                 self._handle_position(candle)
 
     def _execute_entry(self, price, t_naive):
-        # AI 필터 (공격적 0.5)
-        if self.ai_model:
-            features = [t_naive.hour, 1.0, 50.0, 1.0, 0.01, 1.0]
-            prob = self.ai_model.predict_proba(pd.DataFrame([features], columns=["entry_hour", "atr_5m", "rsi_5m", "disparity_5m", "fvg_size_ratio", "volume_ma_ratio"]))[0][1]
-            if prob < 0.5: return
-
-        sl = price * 0.98 # 2% 손절
+        # AI 필터 해제 (작동 여부 확인 우선)
+        sl = price * 0.985 # 1.5% 손절
         self.current_pos = {
-            "entry_price": price, "sl": sl, "tp1": price * 1.025, "tp2": price * 1.05,
+            "entry_price": price, "sl": sl, "tp1": price * 1.02, "tp2": price * 1.04,
             "qty": int((self.capital * 0.01) / (price - sl + 1e-9)), "tp1_hit": False
         }
         self.state = "IN_POSITION"
@@ -114,21 +100,25 @@ class SMCBacktester:
 
 async def main():
     alpaca = AlpacaHandler(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"))
-    ai_model = None
-    model_path = os.path.join(os.path.dirname(__file__), "my_trading_bot", "ai", "smc_ai_filter.json")
-    if os.path.exists(model_path) and AI_AVAILABLE:
-        ai_model = XGBClassifier(); ai_model.load_model(model_path)
-
     symbols = ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "SMCI", "ARM", "NFLX"]
-    print(f"=== [공격 모드 V4] 데이터 로드 및 분석 시작 ===")
     
-    tasks = [alpaca.get_historical_candles(sym, timeframe="1Min", limit=10000) for sym in symbols]
+    # 확실한 과거 데이터 구간 (최근 15일 전 ~ 3일 전)
+    start_dt = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%dT%G:%i:%SZ") # 잘못된 포맷 방지
+    start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%dT09:30:00Z")
+    end_str = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%dT16:00:00Z")
+
+    print(f"=== [공격 모드 V5] {start_str} ~ {end_str} 데이터 로드 중... ===")
+    
+    tasks = [alpaca.get_historical_candles(sym, timeframe="1Min", limit=10000, start=start_str, end=end_str) for sym in symbols]
     all_candles = await asyncio.gather(*tasks)
 
     total_pnl = 0; total_trades = 0
     for i, candles in enumerate(all_candles):
-        if not candles: continue
-        tester = SMCBacktester(symbols[i], pd.DataFrame(candles), ai_model)
+        if not candles or len(candles) < 500: 
+            print(f"[{symbols[i]}] 데이터 부족 ({len(candles) if candles else 0}개)"); continue
+        
+        print(f"[{symbols[i]}] 데이터 {len(candles)}개 로드 완료. 백테스트 시작...")
+        tester = SMCBacktester(symbols[i], pd.DataFrame(candles))
         tester.run()
         pnl = tester.capital - tester.initial_capital
         total_pnl += pnl
