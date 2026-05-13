@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-[AI 모델 검증 전용] backtest_validation.py
-학습된 AI 모델(smc_ai_filter.json)의 성능을 동일한 종목(TSLA, NVDA 등)에서 
-AI 필터 적용 전/후로 비교 검증하기 위한 스크립트입니다.
+[AI 전략 최적화 비교] backtest_validation.py
+3가지 개선 아이디어의 7가지 조합을 모두 테스트하여 최적의 설정을 찾습니다.
+1. AI 임계치 강화 (0.5 -> 0.7)
+2. 손절가 여유 (0.8% -> 1.0%)
+3. 변동성 폭탄 필터 (ATR 기반 장대봉 진입 금지)
 """
 
 import asyncio
@@ -13,7 +15,6 @@ import pandas as pd
 from dotenv import load_dotenv, find_dotenv
 
 from my_trading_bot.core.api_handler import KISApiHandler
-from my_trading_bot.core.scanner import RankScanner
 from my_trading_bot.core.alpaca_handler import AlpacaHandler
 from my_trading_bot.strategies.v1_smc.poi_detector import (
     detect_fvg, detect_ob, calculate_atr, is_price_in_poi, is_overlapping
@@ -22,9 +23,7 @@ from my_trading_bot.strategies.v1_smc.sl_tp_calculator import (
     calc_sl_price, calc_tp1, calc_tp2
 )
 from my_trading_bot.strategies.v1_smc.params import (
-    POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT, ATR_PERIOD,
-    TP1_RR_RATIO, TRADE_RISK_RATIO, COMMISSION_RATE, AI_PROB_THRESHOLD,
-    TP1_CLOSE_RATIO
+    TRADE_RISK_RATIO, COMMISSION_RATE, TP1_CLOSE_RATIO
 )
 
 try:
@@ -33,35 +32,34 @@ try:
 except ImportError:
     AI_AVAILABLE = False
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# 로깅 설정 (비교를 위해 로그를 줄임)
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# [검증 설정] 
-# False: AI가 거절하면 실제로 진입하지 않음 (실전 성능 테스트)
-# True: 모든 타점에 진입하되 AI의 예측값만 기록 (데이터 수집용)
-COLLECT_DATA_MODE = False 
 
 load_dotenv(find_dotenv())
 
 class SMCBacktester:
-    def __init__(self, symbol: str, candles_1m: list, initial_capital: float = 10000000.0, ai_model=None):
+    def __init__(self, symbol, candles, ai_model=None, 
+                 ai_threshold=0.5, min_risk_pct=0.008, vol_filter_on=False):
         self.symbol = symbol
-        self.df = pd.DataFrame(candles_1m)
-        self.initial_capital = initial_capital
-        self.capital = initial_capital
-        self.ai_model = ai_model 
-        self.market_type = "US"
+        self.df = pd.DataFrame(candles)
+        self.initial_capital = 10000000.0
+        self.capital = self.initial_capital
+        self.ai_model = ai_model
+        
+        # 최적화 파라미터
+        self.ai_threshold = ai_threshold
+        self.min_risk_pct = min_risk_pct
+        self.vol_filter_on = vol_filter_on
         
         self.trades = []
         self.state = "MONITORING"
         self.active_poi = None
         self.poi_zones_entry = []
         self.current_pos = None
-        self.data_rows = []
         self.filtered_count = 0
         
-    def _resample_to_5m(self, df_1m: pd.DataFrame) -> list:
+    def _resample_to_5m(self, df_1m):
         df_1m['time'] = pd.to_datetime(df_1m['time'])
         df_1m.set_index('time', inplace=True)
         df_5m = df_1m.resample('5min').agg({
@@ -70,7 +68,7 @@ class SMCBacktester:
         df_1m.reset_index(inplace=True)
         return df_5m.reset_index().to_dict('records')
 
-    def _calculate_indicators(self, df: pd.DataFrame):
+    def _calculate_indicators(self, df):
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -82,13 +80,12 @@ class SMCBacktester:
 
     def run(self):
         start_idx = 250
-        if len(self.df) < start_idx + 10: return
+        if len(self.df) < start_idx: return
 
         for i in range(start_idx, len(self.df)):
             current_candle = self.df.iloc[i]
             price = current_candle['close']
-            curr_time = current_candle['time']
-            curr_dt = pd.to_datetime(curr_time, utc=True)
+            curr_dt = pd.to_datetime(current_candle['time'], utc=True)
             
             if self.state == "MONITORING":
                 if curr_dt.minute % 5 == 0:
@@ -103,7 +100,6 @@ class SMCBacktester:
                 if touched:
                     self.state = "STANDBY"
                     self.active_poi = touched
-                    self._update_entry_poi(past_df.iloc[-20:]) 
 
             elif self.state == "STANDBY":
                 if price > self.active_poi["high"] * 1.01:
@@ -111,133 +107,99 @@ class SMCBacktester:
                     continue
                 
                 past_df = self.df.iloc[:i]
-                self._update_entry_poi(past_df.iloc[-20:])
-                if is_price_in_poi(price, self.poi_zones_entry):
-                    self._execute_entry(price, past_df, curr_time)
+                # 진입용 1분봉 POI 계산
+                candles_1m = past_df.iloc[-20:].to_dict('records')
+                atr_1m = calculate_atr(candles_1m)
+                fvg_1m = detect_fvg(candles_1m, atr=atr_1m)
+                ob_1m = detect_ob(candles_1m, fvg_1m)
+                entry_pois = [z for z in (fvg_1m + ob_1m) if z["type"] == "bullish" and is_overlapping(self.active_poi, z)]
+                
+                if is_price_in_poi(price, entry_pois):
+                    self._execute_entry(price, past_df, current_candle)
 
             elif self.state == "IN_POSITION":
                 self._handle_position(current_candle)
 
-    def _update_entry_poi(self, past_1m_candles_df: pd.DataFrame):
-        candles_entry = past_1m_candles_df.to_dict('records')
-        atr = calculate_atr(candles_entry)
-        fvg = detect_fvg(candles_entry, atr=atr)
-        ob = detect_ob(candles_entry, fvg)
-        all_bullish_entry = [z for z in (fvg + ob) if z["type"] == "bullish"]
-        self.poi_zones_entry = [z for z in all_bullish_entry if is_overlapping(self.active_poi, z)]
+    def _execute_entry(self, price, past_df, candle):
+        curr_time = candle['time']
+        # 1. 킬존 필터
+        et_dt = pd.to_datetime(curr_time, utc=True).tz_convert('America/New_York')
+        if (et_dt.hour == 9 and et_dt.minute >= 30) or (et_dt.hour == 10 and et_dt.minute < 30): return
 
-    def _is_uptrend(self, past_df: pd.DataFrame) -> bool:
-        try:
-            df_tmp = past_df.copy()
-            df_tmp['time'] = pd.to_datetime(df_tmp['time'])
-            df_15m = df_tmp.set_index('time').resample('15min').agg({
-                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-            }).dropna()
+        # 2. HTF 추세 필터 (간소화)
+        df_5m = pd.DataFrame(self._resample_to_5m(past_df.iloc[-500:]))
+        ema50 = df_5m['close'].ewm(span=50).mean().iloc[-1]
+        if price < ema50: return
 
-            if len(df_15m) < 60: return False
-            closes_15m = df_15m['close'].values
-            ema50 = pd.Series(closes_15m).ewm(span=50, adjust=False).mean().iloc[-1]
-            current_price = closes_15m[-1]
-            ema_uptrend = current_price > ema50
+        # 3. 변동성 폭탄 필터 (조합 옵션)
+        if self.vol_filter_on:
+            last_5m_body = abs(df_5m.iloc[-1]['close'] - df_5m.iloc[-1]['open'])
+            atr_5m = calculate_atr(df_5m.to_dict('records'))
+            if last_5m_body > atr_5m * 1.5: return
 
-            highs_15m, lows_15m = df_15m['high'].values, df_15m['low'].values
-            prev_high, curr_high = highs_15m[-10:-5].max(), highs_15m[-5:].max()
-            prev_low, curr_low = lows_15m[-10:-5].min(), lows_15m[-5:].min()
-            structure_uptrend = (curr_high > prev_high) and (curr_low > prev_low)
-            return ema_uptrend and structure_uptrend
-        except: return False
-
-    def _is_kill_zone(self, curr_dt: pd.Timestamp) -> bool:
-        et_dt = curr_dt.tz_convert('America/New_York')
-        h, m = et_dt.hour, et_dt.minute
-        return (h == 9 and m >= 30) or (h == 10 and m < 30)
-
-    def _execute_entry(self, price, past_df, curr_time):
-        curr_dt = pd.to_datetime(curr_time, utc=True)
-        if self._is_kill_zone(curr_dt): return
-        if not self._is_uptrend(past_df): return
-
-        candles_5m = self._resample_to_5m(past_df.iloc[-250:])
+        # SL/TP 계산
         candles_1m = past_df.iloc[-20:].to_dict('records')
         sl = calc_sl_price(candles_1m, direction="long")
         if not sl or sl >= price: sl = price * 0.988
-        if (price - sl) / price < 0.008: return
+        
+        # 리스크 필터 (조합 옵션)
+        if (price - sl) / price < self.min_risk_pct: return
+
+        # AI 필터 (조합 옵션)
+        if self.ai_model:
+            df_5m_ind = self._calculate_indicators(df_5m)
+            last_5 = df_5m_ind.iloc[-1]
+            features = [
+                pd.to_datetime(curr_time).hour,
+                calculate_atr(df_5m_ind.to_dict('records')),
+                last_5['rsi_5m'], last_5['disparity_5m'],
+                (price-sl)/price,
+                candle['volume'] / past_df.iloc[-20:]['volume'].mean() if past_df.iloc[-20:]['volume'].mean() > 0 else 1.0
+            ]
+            prob = self.ai_model.predict_proba(pd.DataFrame([features], columns=["entry_hour", "atr_5m", "rsi_5m", "disparity_5m", "fvg_size_ratio", "volume_ma_ratio"]))[0][1]
+            if prob < self.ai_threshold:
+                self.filtered_count += 1
+                return
 
         tp1 = calc_tp1(price, sl)
-        bearish_fvgs = [z for z in detect_fvg(candles_5m) if z["type"] == "bearish"]
-        tp2 = calc_tp2(price, sl, candles_5m, bearish_fvgs)
+        tp2 = calc_tp2(price, sl, df_5m.to_dict('records'), [])
         
         risk_amt = self.capital * TRADE_RISK_RATIO
         qty = int(risk_amt / (price - sl))
         if qty <= 0: qty = 1
         
-        df_5m = self._calculate_indicators(pd.DataFrame(self._resample_to_5m(past_df.iloc[-500:])))
-        last_5m = df_5m.iloc[-1]
-        features = {
-            "entry_hour": pd.to_datetime(curr_time).hour,
-            "atr_5m": calculate_atr(df_5m.to_dict('records')),
-            "rsi_5m": last_5m['rsi_5m'], "disparity_5m": last_5m['disparity_5m'],
-            "fvg_size_ratio": abs(price - sl) / price,
-            "volume_ma_ratio": past_df.iloc[-1]['volume'] / past_df.iloc[-20:]['volume'].mean() if past_df.iloc[-20:]['volume'].mean() > 0 else 1.0
-        }
-
-        if self.ai_model:
-            feature_cols = ["entry_hour", "atr_5m", "rsi_5m", "disparity_5m", "fvg_size_ratio", "volume_ma_ratio"]
-            input_data = pd.DataFrame([[features[c] for c in feature_cols]], columns=feature_cols)
-            prob = self.ai_model.predict_proba(input_data)[0][1]
-            if prob < AI_PROB_THRESHOLD:
-                self.filtered_count += 1
-                if not COLLECT_DATA_MODE: return
-                logger.info(f"  [AI FILTER-SKIP] 진입 거절 (확률: {prob:.2f})")
-
         self.current_pos = {
-            "entry_price": price, "sl": sl, "initial_sl": sl, "tp1": tp1, "tp2": tp2,
-            "qty": qty, "remaining_qty": qty, "tp1_hit": False, "entry_time": curr_time, "features": features
+            "entry_price": price, "sl": sl, "tp1": tp1, "tp2": tp2,
+            "qty": qty, "remaining_qty": qty, "tp1_hit": False
         }
         self.state = "IN_POSITION"
-        logger.info(f"  [ENTRY] {curr_time} | Price: {price:.2f}, SL: {sl:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
 
     def _handle_position(self, candle):
         pos = self.current_pos
-        high, low, curr_time = candle['high'], candle['low'], candle['time']
-
+        high, low = candle['high'], candle['low']
         if low <= pos["sl"]:
-            rem_qty = pos["remaining_qty"]
-            fee = pos["entry_price"] * rem_qty * COMMISSION_RATE
-            pnl = (pos["sl"] - pos["entry_price"]) * rem_qty - fee
+            pnl = (pos["sl"] - pos["entry_price"]) * pos["remaining_qty"] - (pos["entry_price"] * pos["remaining_qty"] * COMMISSION_RATE)
             self.capital += pnl
-            self.trades.append({"type": "SL", "pnl": pnl})
-            logger.info(f"  [EXIT-SL] {curr_time} | PnL: {pnl:.2f}, Balance: {self.capital:.2f}")
-            self._reset_state()
+            self.trades.append(pnl)
+            self.state = "MONITORING"
             return
-
         if not pos["tp1_hit"] and high >= pos["tp1"]:
-            close_qty = max(1, int(pos["remaining_qty"] * TP1_CLOSE_RATIO))
-            fee = pos["entry_price"] * close_qty * COMMISSION_RATE
-            pnl_partial = (pos["tp1"] - pos["entry_price"]) * close_qty - fee
-            self.capital += pnl_partial
+            close_qty = int(pos["remaining_qty"] * TP1_CLOSE_RATIO)
+            pnl = (pos["tp1"] - pos["entry_price"]) * close_qty - (pos["entry_price"] * close_qty * COMMISSION_RATE)
+            self.capital += pnl
+            self.trades.append(pnl)
             pos["remaining_qty"] -= close_qty
             pos["sl"] = pos["entry_price"] * 1.002
             pos["tp1_hit"] = True
-            logger.info(f"  [EXIT-TP1] {curr_time} | PnL: {pnl_partial:.2f}, SL Breakeven 이동")
-            if pos["remaining_qty"] <= 0: self._reset_state()
+            if pos["remaining_qty"] <= 0: self.state = "MONITORING"
             return
-
         if high >= pos["tp2"]:
-            rem_qty = pos["remaining_qty"]
-            fee = pos["entry_price"] * rem_qty * COMMISSION_RATE
-            pnl = (pos["tp2"] - pos["entry_price"]) * rem_qty - fee
+            pnl = (pos["tp2"] - pos["entry_price"]) * pos["remaining_qty"] - (pos["entry_price"] * pos["remaining_qty"] * COMMISSION_RATE)
             self.capital += pnl
-            self.trades.append({"type": "TP2", "pnl": pnl})
-            logger.info(f"  [EXIT-TP2] {curr_time} | PnL: {pnl:.2f}, Balance: {self.capital:.2f}")
-            self._reset_state()
-
-    def _reset_state(self):
-        self.state = "MONITORING"
-        self.current_pos = None
+            self.trades.append(pnl)
+            self.state = "MONITORING"
 
 async def main():
-    load_dotenv(find_dotenv())
     api = KISApiHandler(os.getenv("KIS_APP_KEY"), os.getenv("KIS_APP_SECRET"))
     api.issue_access_token()
     alpaca = AlpacaHandler(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"))
@@ -245,41 +207,61 @@ async def main():
     ai_model = None
     model_path = os.path.join(os.path.dirname(__file__), "my_trading_bot", "ai", "smc_ai_filter.json")
     if os.path.exists(model_path) and AI_AVAILABLE:
-        ai_model = XGBClassifier()
-        ai_model.load_model(model_path)
-        logger.warning(f"AI 검증용 모델 로드 완료: {model_path}")
+        ai_model = XGBClassifier(); ai_model.load_model(model_path)
 
-    # [검증 대상 종목 고정] 아까와 동일한 종목으로 비교
-    top_symbols = [("NAS", "TSLA"), ("NAS", "NVDA"), ("NAS", "AAPL"), ("NAS", "MSFT"), ("NAS", "AMD")]
-    results = []
-    
-    for excd, symbol in top_symbols:
-        logger.info(f"=== {symbol} 검증 데이터 수집 중 ===")
-        all_candles = []
-        # 과거 60일치 데이터 수집
+    # 데이터 미리 로드 (시간 절약)
+    symbols = ["TSLA", "NVDA", "AAPL", "MSFT", "AMD"]
+    market_data = {}
+    print(f"=== 검증용 데이터 {len(symbols)}종목 로드 중... ===")
+    for sym in symbols:
         start_dt = datetime.now() - timedelta(days=120)
         end_dt = datetime.now() - timedelta(days=60)
-        for _ in range(3):
-            candles = await alpaca.get_historical_candles(symbol, timeframe="1Min", limit=10000, start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
-            if not candles: break
-            all_candles.extend(candles)
-            start_dt = datetime.strptime(candles[-1]["time"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=1)
-        
-        if all_candles:
-            tester = SMCBacktester(symbol, all_candles, ai_model=ai_model)
-            tester.run()
-            results.append({"symbol": symbol, "trades": len(tester.trades), "pnl": tester.capital - tester.initial_capital})
+        market_data[sym] = await alpaca.get_historical_candles(sym, timeframe="1Min", limit=15000, start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    print("\n" + "="*50)
-    print("      AI MODEL VALIDATION SUMMARY")
-    print("="*50)
-    total_pnl = 0
-    for r in results:
-        print(f"{r['symbol']:<10} | {r['trades']:<8} | ${r['pnl']:>10.2f}")
-        total_pnl += r["pnl"]
-    print("-" * 50)
-    print(f"TOTAL PnL: ${total_pnl:.2f}")
-    print("="*50)
+    # 조합 정의
+    configs = [
+        {"name": "기본(Base)", "ai": 0.5, "sl": 0.008, "vol": False},
+        {"name": "조합1(AI강화)", "ai": 0.7, "sl": 0.008, "vol": False},
+        {"name": "조합2(손절여유)", "ai": 0.5, "sl": 0.010, "vol": False},
+        {"name": "조합3(변동성필터)", "ai": 0.5, "sl": 0.008, "vol": True},
+        {"name": "조합4(AI+손절)", "ai": 0.7, "sl": 0.010, "vol": False},
+        {"name": "조합5(AI+변동성)", "ai": 0.7, "sl": 0.008, "vol": True},
+        {"name": "조합6(손절+변동성)", "ai": 0.5, "sl": 0.010, "vol": True},
+        {"name": "조합7(전체적용)", "ai": 0.7, "sl": 0.010, "vol": True},
+    ]
+
+    final_results = []
+    print(f"\n=== 총 {len(configs)}가지 조합 테스트 시작 ===")
+    
+    for cfg in configs:
+        total_pnl = 0
+        total_trades = 0
+        win_trades = 0
+        
+        for sym, candles in market_data.items():
+            if not candles: continue
+            tester = SMCBacktester(sym, candles, ai_model, cfg['ai'], cfg['sl'], cfg['vol'])
+            tester.run()
+            total_pnl += (tester.capital - tester.initial_capital)
+            total_trades += len(tester.trades)
+            win_trades += len([t for t in tester.trades if t > 0])
+            
+        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        final_results.append({
+            "name": cfg['name'],
+            "pnl": total_pnl,
+            "trades": total_trades,
+            "win_rate": win_rate
+        })
+        print(f"[{cfg['name']}] 완료: PnL ${total_pnl:,.2f}, 승률 {win_rate:.2f}%")
+
+    # 결과 표 출력
+    print("\n" + "="*70)
+    print(f"{'조합명':<15} | {'PnL (Total)':<15} | {'매매횟수':<8} | {'승률':<8}")
+    print("-" * 70)
+    for r in sorted(final_results, key=lambda x: x['pnl'], reverse=True):
+        print(f"{r['name']:<15} | ${r['pnl']:>13,.2f} | {r['trades']:<8} | {r['win_rate']:>7.2f}%")
+    print("="*70)
 
 if __name__ == "__main__":
     asyncio.run(main())
