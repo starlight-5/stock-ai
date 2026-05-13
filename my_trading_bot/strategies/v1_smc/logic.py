@@ -45,7 +45,8 @@ from .params import (
     POI_CANDLE_COUNT, ENTRY_CANDLE_COUNT,
     TP1_CLOSE_RATIO, BUY_DVSN, SELL_DVSN, ORDER_TYPE_MARKET,
     AI_PROB_THRESHOLD,
-    KILL_ZONE_START_UTC_HOUR, KILL_ZONE_END_UTC_HOUR, KILL_ZONE_MINUTE_END,
+    KILL_ZONE_START_HOUR, KILL_ZONE_START_MINUTE, 
+    KILL_ZONE_END_HOUR, KILL_ZONE_END_MINUTE,
 )
 from .poi_detector import (
     detect_fvg, detect_ob, is_price_in_poi, calculate_atr, is_overlapping
@@ -678,20 +679,21 @@ class V1SmcBot(BaseStrategy):
 
     def _is_kill_zone(self) -> bool:
         """
-        [개선] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다.
-        개장 후 첫 1시간(UTC 14:30~15:30)은 유동성 헌팅이 극심하여 
-        진입 시 휩소 손절 위험이 매우 높습니다.
+        [개선] 미국 개장 직후 킬 존(Kill Zone) 여부를 판단합니다. (ET 기준)
+        개장 후 첫 1시간(09:30~10:30 ET)은 유동성 헌팅이 극심하여 
+        진입 시 휩소 손절 위험이 매우 높습니다. 서머타임을 자동으로 반영합니다.
         """
-        now_utc = datetime.now(timezone.utc)
-        h = now_utc.hour
-        m = now_utc.minute
+        now = now_et()
+        h = now.hour
+        m = now.minute
 
-        # UTC 14:30 ~ 15:30 구간 차단
-        if h == KILL_ZONE_START_UTC_HOUR and m >= 30:
-            return True
-        if h == KILL_ZONE_END_UTC_HOUR and m < KILL_ZONE_MINUTE_END:
-            return True
-        return False
+        # ET 기준 09:30 ~ 10:30 구간 차단
+        # 시작 시간 체크 (09:30)
+        is_after_start = (h > KILL_ZONE_START_HOUR) or (h == KILL_ZONE_START_HOUR and m >= KILL_ZONE_START_MINUTE)
+        # 종료 시간 체크 (10:30)
+        is_before_end = (h < KILL_ZONE_END_HOUR) or (h == KILL_ZONE_END_HOUR and m < KILL_ZONE_END_MINUTE)
+
+        return is_after_start and is_before_end
 
     async def _is_uptrend(self) -> bool:
         """

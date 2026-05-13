@@ -99,9 +99,12 @@ KILL_SWITCH_CHECK_INTERVAL_SEC: int = 60  # 1분
 #         이 시간 동안은 SWEEP & REVERSE를 노리기 어려운 일반 FVG 진입을 제한.
 #         백테스트에서는 이 시간 진입을 스킵하여 휩소 손절 빈도 감소 기대.
 # UTC 기준 미국 개장 킬존: 14:30~15:30 (한국시간 23:30~00:30)
-KILL_ZONE_START_UTC_HOUR: int = 14  # UTC 14시 (미국 개장)
-KILL_ZONE_END_UTC_HOUR: int = 15    # UTC 15시 (개장 후 첫 1시간 제한)
-KILL_ZONE_MINUTE_END: int = 30      # 15:30 UTC까지 제한
+# 미국 동부 기준(ET) 킬 존: 개장 후 첫 1시간 (09:30~10:30 ET)
+# 개장 직후 1시간은 유동성 헌팅이 극심하여 진입을 제한합니다.
+KILL_ZONE_START_HOUR: int = 9
+KILL_ZONE_START_MINUTE: int = 30
+KILL_ZONE_END_HOUR: int = 10
+KILL_ZONE_END_MINUTE: int = 30
 
 # ─────────────────────────────────────────────────
 # [기본 거래 설정]
